@@ -1,143 +1,107 @@
-import struct
-import sys
+import sys, struct
 from pathlib import Path
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 
-EXE = Path(sys.argv[1])
-d = EXE.read_bytes()
-pe = struct.unpack_from('<I', d, 0x3C)[0]
-base = struct.unpack_from('<Q', d, pe + 24 + 24)[0]
-nsecs = struct.unpack_from('<H', d, pe + 6)[0]
-opt = struct.unpack_from('<H', d, pe + 20)[0]
-sec = pe + 24 + opt
-sections = []
-for i in range(nsecs):
-    o = sec + i * 40
-    name = d[o:o+8].rstrip(b'\0').decode('ascii', 'replace')
-    va = struct.unpack_from('<I', d, o + 12)[0]
-    rs = struct.unpack_from('<I', d, o + 16)[0]
-    rp = struct.unpack_from('<I', d, o + 20)[0]
-    sections.append((name, va, rs, rp))
+def u16(d,o): return struct.unpack_from('<H',d,o)[0]
+def u32(d,o): return struct.unpack_from('<I',d,o)[0]
+def u64(d,o): return struct.unpack_from('<Q',d,o)[0]
 
-def rva_to_fo(rva):
-    for _, va, rs, rp in sections:
-        if va <= rva < va + rs:
-            return rp + (rva - va)
+def sections(d):
+    pe=u32(d,0x3c); n=u16(d,pe+6); opt=u16(d,pe+20); so=pe+24+opt; out=[]
+    for i in range(n):
+        o=so+i*40
+        out.append((d[o:o+8].rstrip(b'\0').decode('ascii','replace'),u32(d,o+12),u32(d,o+16),u32(d,o+20),u32(d,o+8),u32(d,o+36)))
+    return out
+
+def fo_to_rva(fo,ss):
+    for n,va,rs,rp,vs,ch in ss:
+        if rp<=fo<rp+rs:return va+(fo-rp)
     return None
 
-def in_text(rva):
-    return any(n == '.text' and va <= rva < va + rs for n, va, rs, _ in sections)
+def rva_to_fo(rva,ss):
+    for n,va,rs,rp,vs,ch in ss:
+        if va<=rva<va+rs:return rp+(rva-va)
+    return None
 
-def read_ascii(addr):
-    if addr < 0 or addr >= len(d):
-        return ''
-    end = d.find(b'\0', addr, min(len(d), addr + 256))
-    if end < 0:
-        end = min(len(d), addr + 256)
-    try:
-        return d[addr:end].decode('ascii', 'replace')
-    except Exception:
-        return ''
+def in_text(rva,ss): return any(n=='.text' and va<=rva<va+rs for n,va,rs,rp,vs,ch in ss)
 
-md = Cs(CS_ARCH_X86, CS_MODE_64)
-md.detail = True
-
-def disasm(rva, size=256):
-    fo = rva_to_fo(rva)
-    if fo is None:
-        return []
-    return list(md.disasm(d[fo:fo+size], base+rva))
-
-def fmt(rva, text):
-    return f'0x{rva:X}: {text}'
-
-def rel_target(insn):
-    if insn.mnemonic != 'call' or not insn.bytes or insn.bytes[0] != 0xE8:
-        return None
-    rel = struct.unpack_from('<i', bytes(insn.bytes), 1)[0]
-    return insn.address + insn.size + rel - base
-
-name = b'GetCraftSpeedByWorkSuitability'
-occ = []
-start = 0
-while True:
-    i = d.find(name, start)
-    if i < 0:
-        break
-    occ.append(i)
-    start = i + 1
-
-print(f'EXE_SIZE={len(d)}')
-print(f'IMAGE_BASE=0x{base:X}')
-print(f'GETCRAFT_NAME_OCCURRENCES={len(occ)}')
-
-# Find text pointers in the image that reference the reflected name.
-cands = {}
-for i in occ:
-    addr = i
-    q = struct.pack('<Q', base + addr)
-    pos = 0
+def findall(d,p):
+    s=0
     while True:
-        p = d.find(q, pos)
-        if p < 0:
-            break
-        rva = p
-        fo_field = rva + 8
-        if fo_field + 8 <= len(d):
-            ptr = struct.unpack_from('<Q', d, fo_field)[0]
-            fn_rva = ptr - base
-            if 0 <= fn_rva < len(d) and in_text(fn_rva):
-                cands.setdefault(fn_rva, 0)
-                cands[fn_rva] += 1
-        pos = p + 1
+        i=d.find(p,s)
+        if i<0:return
+        yield i; s=i+1
 
-print('REFLECTION_FN_CANDIDATES:')
-for rva, hits in sorted(cands.items(), key=lambda x: (-x[1], x[0])):
-    print(f'  0x{rva:X} hits={hits}')
-    for ins in disasm(rva, 384):
-        rr = ins.address - base
-        s = ins.op_str.lower()
-        if ins.mnemonic == 'ret' or ins.mnemonic == 'call' or any(k in s for k in ('[rcx +', '[rdx +', '[rax +', '[r8 +')) or ins.mnemonic in {'cmp','test','mov','movzx','movsxd','lea','imul','add','sub','shl','shr','sar','idiv','cdq','cmovg','cmovge','cmovl','cmovle','jg','jge','jl','jle','ja','jb','je','jne'}:
-            print(f'    {fmt(rr, ins.mnemonic + " " + ins.op_str)}')
+def native_candidates(d,ss,base,names):
+    seen=set(); candidates={}
+    for name in names:
+        for fo in findall(d,name):
+            r=fo_to_rva(fo,ss)
+            if r is None: continue
+            ptr=struct.pack('<Q',base+r)
+            for sec,va,rs,rp,vs,ch in ss:
+                for pfo in findall(d[rp:rp+rs],ptr):
+                    at=rp+pfo
+                    for q in (at-8,at):
+                        if q<0 or q+16>len(d): continue
+                        a=u64(d,q); b=u64(d,q+8)
+                        ar=a-base if a>=base else -1; br=b-base if b>=base else -1
+                        native=None; pair=None
+                        if ar==r and in_text(br,ss): native=br; pair=q
+                        elif br==r and in_text(ar,ss): native=ar; pair=q
+                        if native is None: continue
+                        key=(name,native,pair)
+                        if key in seen: continue
+                        seen.add(key); candidates.setdefault(name.decode(),[]).append(native)
+                        print(f'{name.decode()} string_rva=0x{r:X} pair_rva=0x{fo_to_rva(pair,ss):X} native_rva=0x{native:X}')
+    return candidates
 
-# Reverse references: enumerate direct calls to each candidate and nearby instructions.
-print('DIRECT_CALLERS:')
-callers = {}
-for cand in cands:
-    target_abs = base + cand
-    needle = struct.pack('<i', 0)  # placeholder to avoid endian helpers below
-    for rva in range(0x1000, len(d) - 5):
-        fo = rva_to_fo(rva)
-        if fo is None or d[fo] != 0xE8:
-            continue
-        rel = struct.unpack_from('<i', d, fo + 1)[0]
-        dest = (base + rva + 5 + rel) - base
-        if dest == cand:
-            callers.setdefault(rva, []).append(cand)
+def disasm_function(d,ss,base,rva,limit=1024):
+    fo=rva_to_fo(rva,ss)
+    if fo is None: return []
+    md=Cs(CS_ARCH_X86,CS_MODE_64); md.detail=True
+    ins=list(md.disasm(d[fo:fo+limit],base+rva))
+    print(f'FOCUS_FUNCTION RVA=0x{rva:X} FILE=0x{fo:X}')
+    for i in ins:
+        rel=i.address-(base+rva); op=i.op_str.lower()
+        if i.mnemonic in ('cmp','mov','lea','add','sub','imul','idiv','div','test','and','or','xor','shl','shr','sar','call','jmp','je','jne','jg','jge','jl','jle','ja','jae','jb','jbe','seta','setae','setb','setbe','sete','setne','cmovg','cmovge','cmovl','cmovle','cmova','cmovae','cmovb','cmovbe','cmove','cmovne','ret') or any(x in op for x in ('0xa','0x64','[rcx +','[rdx +','[rax +','[r8 +')):
+            print(f'  +0x{rel:03X}: {i.mnemonic} {i.op_str}')
+    print('END_FOCUS_FUNCTION')
+    return ins
 
-for rva, targets in sorted(callers.items()):
-    print(f'  CALLER=0x{rva:X} -> {", ".join(f"0x{x:X}" for x in targets)}')
-    fn = max(0x1000, rva - 96)
-    for ins in disasm(fn, 224):
-        rr = ins.address - base
-        if rr > rva + 96:
-            break
-        if rr >= rva - 64:
-            print(f'    {fmt(rr, ins.mnemonic + " " + ins.op_str)}')
+def main():
+    d=Path(sys.argv[1]).read_bytes(); ss=sections(d); pe=u32(d,0x3c); base=struct.unpack_from('<Q',d,pe+24+24)[0]
+    print(f'EXE_SIZE={len(d)} IMAGE_BASE=0x{base:X}')
+    names=[b'GetCraftSpeedByWorkSuitability',b'CanUseTargetWorkSuitabilityRankUp',b'GetWorkSuitabilityRank',b'GetWorkSuitabilityRankWithCharacterRank',b'HasWorkSuitabilityRank',b'GetCraftSpeed_WorkSuitability']
+    print('NATIVE_LOOKUP:')
+    candidates=native_candidates(d,ss,base,names)
+    print('NATIVE_FUNCTIONS:')
+    all_native=sorted({r for vals in candidates.values() for r in vals})
+    for r in all_native:
+        disasm_function(d,ss,base,r,2048)
 
-# Search for likely CraftSpeed table consumers by looking for the reflected field name,
-# then pointer-adjacent code and direct functions that reference the string's address.
-for field in [b'CraftSpeeds', b'WorkSuitabilityDefineDataMap', b'WorkSuitabilityMaxRank']:
-    occf = []
-    p = 0
-    while True:
-        p = d.find(field, p)
-        if p < 0:
-            break
-        occf.append(p)
-        p += 1
-    print(f'FIELD {field.decode()} OCCURRENCES={len(occf)}')
-    for p in occf[:20]:
-        print(f'  fileoff=0x{p:X} rva=0x{p:X}')
+    print('SPEED_CALL_GRAPH:')
+    speed=set(candidates.get('GetCraftSpeedByWorkSuitability',[]))
+    callers=[]
+    text_sec=next((x for x in ss if x[0]=='.text'),None)
+    if text_sec:
+        _,va,rs,rp,_,_=text_sec
+        for off in range(rp,rp+rs-5):
+            if d[off]!=0xE8: continue
+            rel=struct.unpack_from('<i',d,off+1)[0]
+            call_rva=va+(off-rp)
+            dest_rva=call_rva+5+rel
+            if dest_rva in speed:
+                callers.append((call_rva,dest_rva))
+    for call_rva,dest in callers:
+        print(f'DIRECT_CALLER=0x{call_rva:X} TARGET=0x{dest:X}')
+        start=max(0,call_rva-0x80)
+        start_rva=va+(start-rp)
+        disasm_function(d,ss,base,start_rva,384)
 
-print('END_NATIVE_SPEED_ANALYSIS')
+    print('FIELD_RVAS:')
+    for field in [b'CraftSpeeds',b'WorkSuitabilityDefineDataMap',b'WorkSuitabilityMaxRank']:
+        rs=list(findall(d,field)); print(field.decode()+': '+', '.join(f'0x{x:X}' for x in rs))
+    print('END_NATIVE_SPEED_ANALYSIS')
+
+if __name__=='__main__': main()
