@@ -4,7 +4,7 @@ local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = root .. "/Native/WorkSuitability100.dll"
 dll = dll:gsub("\\\\", "/")
 
-local VERSION = "v2.8"
+local VERSION = "v2.9"
 local TARGET_RANK = 100
 local SPEED_HOOK = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability"
 
@@ -141,7 +141,10 @@ local function install_speed_hook()
                     return nil
                 end
 
-                local scaled = math.floor((speed10 * rank / 10) + 0.5)
+                -- Keep rank 10 at 1x. Rank 30 is exactly 20x.
+                -- Ranks above 30 continue linearly at the same rate.
+                local multiplier = 1 + ((rank - 10) * 19 / 20)
+                local scaled = math.floor((speed10 * multiplier) + 0.5)
                 if scaled < 1 then
                     scaled = 1
                 end
@@ -163,7 +166,7 @@ local function install_speed_hook()
 
     speed_hook_registered = true
     print("[WorkSuitability100 " .. VERSION .. "] Speed hook registered: " .. SPEED_HOOK)
-    print("[WorkSuitability100 " .. VERSION .. "] Rank > 10 speed formula: rank10Speed * rank / 10, capped at rank " .. TARGET_RANK)
+    print("[WorkSuitability100 " .. VERSION .. "] Speed scaling: rank 10 = 1x, rank 30 = 20x, linear growth through rank " .. TARGET_RANK)
     return true
 end
 
