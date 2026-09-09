@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'WorkSuitability100/Native/WorkSuitability100_v1_5.cpp'
+      - 'WorkSuitability100/Native/WorkSuitability100_v1_7.cpp'
       - '.github/workflows/build-work-suitability.yml'
   workflow_dispatch:
 
@@ -29,7 +29,7 @@ jobs:
         shell: cmd
         run: |
           if not exist build mkdir build
-          cl /nologo /LD /O2 /GS- /EHsc- /GR- /std:c++17 WorkSuitability100\Native\WorkSuitability100_v1_5.cpp /Fe:build\WorkSuitability100.dll /link /MACHINE:X64
+          cl /nologo /LD /O2 /GS- /EHsc- /GR- /std:c++17 WorkSuitability100\Native\WorkSuitability100_v1_7.cpp /Fe:build\WorkSuitability100.dll /link /MACHINE:X64
           if errorlevel 1 exit /b 1
 
       - name: Copy DLL into mod
@@ -49,5 +49,5 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add WorkSuitability100/Native/WorkSuitability100.dll WorkSuitability100/Native/BUILD_INFO.txt
           if (git diff --cached --quiet) { exit 0 }
-          git commit -m 'Build WorkSuitability100 v1.5 [skip ci]'
+          git commit -m 'Build WorkSuitability100 v1.7 [skip ci]'
           git push
