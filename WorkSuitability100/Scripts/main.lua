@@ -1,8 +1,9 @@
--- WorkSuitability100 v1.4
--- Inventory-crash fix + native real speed scaling for Palworld Steam v1.0.3.101238.
--- Keeps the rank/handbook ceiling at 100 and moves speed scaling out of UE4SS UFunction hooks.
+-- WorkSuitability100 v1.6
+-- Current Palworld compatibility loader.
+-- The native DLL handles the current rank-100 compatibility check and
+-- retains the legacy byte-patch fallback for older supported binaries.
 
-local MOD = "[WorkSuitability100 v1.4]"
+local MOD = "[WorkSuitability100 v1.6]"
 
 local function get_mod_root()
     local source = debug.getinfo(1, "S").source or ""
@@ -31,6 +32,5 @@ if not ok then
     return
 end
 
-print(MOD .. " Native rank + handbook + work-speed patches loaded.\n")
-print(MOD .. " No UE4SS craft-speed UFunction hooks are installed.\n")
-print(MOD .. " Check WorkSuitability100\\work_suitability_100.log for PATCHED status.\n")
+print(MOD .. " Native compatibility initializer loaded.\n")
+print(MOD .. " Check WorkSuitability100\\work_suitability_100.log for the detected mode.\n")
