@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/tools/analyze_native_lookup.py'
+      - '.github/tools/analyze_speed_candidates.py'
       - '.github/workflows/analyze-speed-only.yml'
       - 'PalworldEXE/Palworld-Win64-Shipping.exe'
   workflow_dispatch:
@@ -31,30 +31,24 @@ jobs:
         run: |
           if (-not (Test-Path PalworldEXE/Palworld-Win64-Shipping.exe)) { throw 'Palworld EXE not found.' }
           Get-FileHash PalworldEXE/Palworld-Win64-Shipping.exe -Algorithm SHA256
-          (Get-Item PalworldEXE/Palworld-Win64-Shipping.exe).Length
 
       - name: Install Capstone
         shell: pwsh
         run: python -m pip install capstone
 
-      - name: Run validated native lookup analysis
+      - name: Run focused speed analysis
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path WorkSuitability100/analysis | Out-Null
-          python .github/tools/analyze_native_lookup.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object WorkSuitability100/analysis/native_lookup.txt
+          python .github/tools/analyze_speed_candidates.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object WorkSuitability100/analysis/speed_candidates.txt
 
-      - name: Extract speed-focused section
-        shell: pwsh
-        run: |
-          Get-Content WorkSuitability100/analysis/native_lookup.txt | Select-String -Pattern 'GetCraftSpeedByWorkSuitability|SPEED_TARGETS:|FOCUSED_CURRENT_WORKSUITABILITY:|END_NATIVE_ANALYSIS|FUNCTION RVA=0x295|FUNCTION RVA=0x296|FOCUS_FUNCTION RVA=0x295|FOCUS_FUNCTION RVA=0x296' -Context 0,80 | Out-File WorkSuitability100/analysis/speed_native.txt -Encoding utf8
-
-      - name: Commit native analysis
+      - name: Commit focused analysis
         shell: pwsh
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add WorkSuitability100/analysis/native_lookup.txt WorkSuitability100/analysis/speed_native.txt
+          git add WorkSuitability100/analysis/speed_candidates.txt
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 0) { exit 0 }
-          git commit -m 'chore: update native speed analysis'
+          git commit -m 'chore: update focused native speed analysis'
           git push
