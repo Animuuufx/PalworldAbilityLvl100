@@ -2,6 +2,8 @@ import sys, struct
 from pathlib import Path
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 
+# Speed-path analysis for the current Palworld executable.
+# Triggered by repository changes so CI can refresh speed_analysis.txt.
 EXE = Path(sys.argv[1])
 d = EXE.read_bytes()
 
@@ -57,8 +59,6 @@ def metadata_candidates(name):
                 for q in (q,pfo):
                     if q+16>len(d): continue
                     a=u64(q); b=u64(q+8)
-                    for native,reverse in ((b,False),(a,True)):
-                        if native==base+a-base if False else False: pass
                     if a==base+r and in_text(b-base): native=b-base
                     elif b==base+r and in_text(a-base): native=a-base
                     else: continue
@@ -89,8 +89,6 @@ print(f'FILE_SIZE={len(d)} IMAGE_BASE=0x{base:X}')
 print('SPEED_NATIVE_CANDIDATES:')
 for r in cands: print(f'  0x{r:X}')
 
-# Known neighboring native entries are often helper functions in the same class.
-# Inspect every exact candidate plus the previously observed speed-helper RVAs.
 focus=set(cands)|{0x295F2C0,0x295D460,0x295D490,0x295D4C0,0x29619B0,0x2961A30,0x2961BA0,0x2961C40,0x2961C70,0x2961C90,0x2961E10,0x2961EA0,0x2961EC0,0x2961EE0,0x2961FD0,0x2962090,0x29620C0,0x29620F0,0x2962120,0x2962150,0x2962180,0x29621B0,0x29621E0,0x2962250,0x2962290,0x29622C0,0x2962350,0x29623E0,0x2962410,0x2962440,0x29624D0,0x2962580}
 
 md=Cs(CS_ARCH_X86,CS_MODE_64); md.detail=True
@@ -99,15 +97,12 @@ for cur in sorted(focus):
     if not ins: continue
     relevant=[]
     for i in ins:
-        op=i.op_str.lower()
-        m=i.mnemonic.lower()
+        op=i.op_str.lower(); m=i.mnemonic.lower()
         if m in {'cmp','test','mov','movss','movsd','add','addss','addsd','sub','subss','subsd','mul','imul','mulss','mulsd','div','idiv','divss','divsd','lea','call','jmp','je','jne','jg','jge','jl','jle','ja','jae','jb','jbe','cmovg','cmovge','cmovl','cmovle','cmova','cmovae','cmovb','cmovbe','seta','setae','setb','setbe','sete','setne','cvtsi2ss','cvttss2si','cvtss2sd','cvtsd2ss','roundss','maxss','minss','ret'} or '0xa' in op:
             relevant.append(i)
-    # Print only candidates with arithmetic/calls or rank-like immediates.
     if not relevant: continue
     print(f'\nFUNCTION RVA=0x{cur:X} FILE=0x{rva_to_fo(cur):X}')
-    for i in relevant[:180]:
-        print('  '+fmt(i))
+    for i in relevant[:180]: print('  '+fmt(i))
     for i in relevant:
         op=i.op_str.lower()
         if '0xa' in op:
