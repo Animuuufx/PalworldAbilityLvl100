@@ -1,0 +1,53 @@
+name: Build WorkSuitability100
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'WorkSuitability100/Native/WorkSuitability100_v1_5.cpp'
+      - '.github/workflows/build-work-suitability.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build DLL
+        shell: cmd
+        run: |
+          if not exist build mkdir build
+          cl /nologo /LD /O2 /GS- /EHsc- /GR- /std:c++17 WorkSuitability100\Native\WorkSuitability100_v1_5.cpp /Fe:build\WorkSuitability100.dll /link /MACHINE:X64
+          if errorlevel 1 exit /b 1
+
+      - name: Copy DLL into mod
+        shell: pwsh
+        run: |
+          Copy-Item build/WorkSuitability100.dll WorkSuitability100/Native/WorkSuitability100.dll -Force
+          $sha = (Get-FileHash WorkSuitability100/Native/WorkSuitability100.dll -Algorithm SHA256).Hash.ToLower()
+          "WorkSuitability100.dll SHA256: $sha" | Set-Content WorkSuitability100/Native/BUILD_INFO.txt
+          Get-Item WorkSuitability100/Native/WorkSuitability100.dll | Select-Object FullName,Length
+
+      - name: Commit rebuilt DLL
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add WorkSuitability100/Native/WorkSuitability100.dll WorkSuitability100/Native/BUILD_INFO.txt
+          if (git diff --cached --quiet) { exit 0 }
+          git commit -m 'Build WorkSuitability100 v1.5 [skip ci]'
+          git push
