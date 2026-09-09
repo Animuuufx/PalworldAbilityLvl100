@@ -1,4 +1,4 @@
-local VERSION = "v0.7"
+local VERSION = "v0.8"
 
 local CAN_USE_HOOK = "/Script/Pal.PalUtility:CanUseTargetWorkSuitabilityRankUp"
 local ADD_RANK_HOOK = "/Script/Pal.PalIndividualCharacterParameter:SetWorkSuitabilityAddRank"
@@ -59,16 +59,13 @@ local function full_name(value)
 end
 
 local function handbook_code(value)
+    if type(value) == "string" then
+        return value:match("WorkSuitability_AddTicket_([%w_]+)")
+    end
     local name = full_name(value)
     return name:match("WorkSuitability_AddTicket_([%w_]+)")
 end
 
-local function is_handbook(value)
-    return handbook_codes[handbook_code(value)] == true
-end
-
--- The reflected signatures have changed between Palworld builds. Do not rely
--- on a fixed parameter position; scan the context and every UFunction arg.
 local function find_handbook(context, ...)
     local values = { context, ... }
     for _, value in ipairs(values) do
@@ -78,6 +75,44 @@ local function find_handbook(context, ...)
         end
     end
     return nil, nil
+end
+
+-- PalItemSlot:CanUseItemToCharacter only receives the target FPalInstanceID.
+-- The handbook itself lives on the slot, so inspect the slot directly.
+local function slot_handbook_code(slot)
+    slot = unwrap(slot)
+    if not slot then return nil end
+
+    local ok, first, second = pcall(function()
+        return slot:TryGetStaticItemData()
+    end)
+
+    if ok then
+        local code = handbook_code(first)
+        if code and handbook_codes[code] then return code end
+        code = handbook_code(second)
+        if code and handbook_codes[code] then return code end
+    end
+
+    local ok_id, item_id = pcall(function()
+        return slot:GetItemId()
+    end)
+    if ok_id and item_id then
+        local raw = unwrap(item_id)
+
+        local ok_static, static_id = pcall(function()
+            return raw.StaticId
+        end)
+        if ok_static and static_id then
+            local code = handbook_code(tostring(unwrap(static_id)))
+            if code and handbook_codes[code] then return code end
+        end
+
+        local code = handbook_code(tostring(raw))
+        if code and handbook_codes[code] then return code end
+    end
+
+    return nil
 end
 
 local function looks_like_character_parameter(value)
@@ -107,6 +142,51 @@ local function find_target(context, ...)
             return unwrap(value)
         end
     end
+    return nil
+end
+
+local function get_character_manager(context)
+    local manager = nil
+
+    pcall(function()
+        local util = StaticFindObject("/Script/Pal.Default__PalUtility")
+        if util and util:IsValid() then
+            manager = util:GetCharacterManager(context)
+        end
+    end)
+
+    if manager and manager:IsValid() then return manager end
+
+    pcall(function()
+        manager = FindFirstOf("PalCharacterManager")
+    end)
+
+    if manager and manager:IsValid() then return manager end
+    return nil
+end
+
+-- Inventory/item-use functions use FPalInstanceID rather than the parameter
+-- object. Resolve that ID through PalCharacterManager.
+local function resolve_target(context, ...)
+    local direct = find_target(context, ...)
+    if direct then return direct end
+
+    local manager = get_character_manager(context)
+    if not manager then return nil end
+
+    local values = { ... }
+    for _, value in ipairs(values) do
+        local id = unwrap(value)
+        if id ~= nil then
+            local ok, target = pcall(function()
+                return manager:GetIndividualCharacterParameter(id)
+            end)
+            if ok and target and target:IsValid() then
+                return target
+            end
+        end
+    end
+
     return nil
 end
 
@@ -210,8 +290,6 @@ local function initialize_missing_suitability(target, code)
         return true
     end
 
-    -- This is the actual unlock operation: create the first persistent +1
-    -- handbook rank on a Pal whose species has zero of this suitability.
     local ok = call_set_work_suitability(target, id, 1)
     if ok then
         mutation_seen[key] = true
@@ -223,16 +301,11 @@ print("[WorkSuitabilityUnlock " .. VERSION .. "] Loading.")
 print("[WorkSuitabilityUnlock " .. VERSION .. "] Handbook-only suitability unlock enabled.")
 
 local slot_pre, slot_post = RegisterHook(SLOT_TARGET_HOOK, function(Context, ...)
-    local item, code = find_handbook(Context, ...)
+    local code = slot_handbook_code(Context)
     if not code then return nil end
 
-    local target = find_target(Context, ...)
     print("[WorkSuitabilityUnlock " .. VERSION .. "] Slot handbook detected: " .. code)
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Slot target: " .. full_name(target))
-
-    if target then
-        mark_pending(target, code)
-    end
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Slot target allowed for handbook: " .. code)
 
     return true
 end)
@@ -247,7 +320,7 @@ local static_pre, static_post = RegisterHook(STATIC_ITEM_HOOK, function(Context,
     local item, code = find_handbook(Context, ...)
     if not code then return nil end
 
-    local target = find_target(Context, ...)
+    local target = resolve_target(Context, ...)
     print("[WorkSuitabilityUnlock " .. VERSION .. "] Item-data handbook detected: " .. code)
     print("[WorkSuitabilityUnlock " .. VERSION .. "] Item-data target: " .. full_name(target))
 
@@ -270,7 +343,7 @@ local processor_pre, processor_post = RegisterHook(
         local item, code = find_handbook(Context, ...)
         if not code then return nil end
 
-        local target = find_target(Context, ...)
+        local target = resolve_target(Context, ...)
         print("[WorkSuitabilityUnlock " .. VERSION .. "] Processor handbook detected: " .. code)
         print("[WorkSuitabilityUnlock " .. VERSION .. "] Processor target: " .. full_name(target))
 
@@ -286,15 +359,13 @@ local processor_pre, processor_post = RegisterHook(
         local item, code = find_handbook(Context, ...)
         if not code then return nil end
 
-        local target = find_target(Context, ...)
+        local target = resolve_target(Context, ...)
         if not target then
             print("[WorkSuitabilityUnlock " .. VERSION .. "] Processor post could not resolve target for " .. code)
             return nil
         end
 
         local key = target_key(target, code)
-        -- Existing suitabilities are left completely to the game's native
-        -- handbook transaction. Only zero/missing suitability is initialized.
         if not mutation_seen[key] then
             initialize_missing_suitability(target, code)
         end
@@ -314,7 +385,7 @@ local can_use_pre, can_use_post = RegisterHook(CAN_USE_HOOK, function(Context, .
     local item, code = find_handbook(Context, ...)
     if not code then return nil end
 
-    local target = find_target(Context, ...)
+    local target = resolve_target(Context, ...)
     print("[WorkSuitabilityUnlock " .. VERSION .. "] Handbook eligibility override: " .. code)
     print("[WorkSuitabilityUnlock " .. VERSION .. "] Eligibility target: " .. full_name(target))
 
@@ -344,9 +415,6 @@ local add_pre, add_post = RegisterHook(ADD_RANK_HOOK, function(Context, WorkSuit
     local key = target_key(target, code)
 
     if code and pending_target[key] and (amount == nil or amount <= 0) then
-        -- Some missing-suitability paths reach the setter with zero because the
-        -- native transaction expected the suitability to exist already. Turn
-        -- that zero into the first real handbook rank.
         AddRank:Set(1)
         mutation_seen[key] = true
         print("[WorkSuitabilityUnlock " .. VERSION .. "] Converted missing handbook rank to 1: " .. code)
