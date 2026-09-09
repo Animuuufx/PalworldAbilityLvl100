@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   analyze:
@@ -36,6 +36,19 @@ jobs:
       - name: Analyze signatures and xrefs
         shell: pwsh
         run: python .github/tools/analyze_palworld.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object analysis.txt
+
+      - name: Save analysis to repository
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add analysis.txt
+          if (-not (git diff --cached --quiet)) {
+            git commit -m 'Save latest Palworld signature analysis [skip ci]'
+            git push
+          } else {
+            Write-Host 'Analysis unchanged; no commit needed.'
+          }
 
       - name: Upload analysis
         uses: actions/upload-artifact@v4
