@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/tools/analyze_palworld.py'
       - '.github/workflows/analyze-palworld.yml'
+      - 'PalworldEXE/Palworld-Win64-Shipping.exe'
   workflow_dispatch:
 
 permissions:
@@ -15,20 +16,18 @@ jobs:
   analyze:
     runs-on: windows-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository with LFS
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
 
-      - name: Download latest release EXE
+      - name: Verify EXE
         shell: pwsh
         run: |
-          $api = 'https://api.github.com/repos/Animuuufx/PalworldAbilityLvl100/releases/latest'
-          $release = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'Aera-Palworld-Analyzer' }
-          $asset = $release.assets | Where-Object { $_.name -eq 'Palworld-Win64-Shipping.exe' } | Select-Object -First 1
-          if (-not $asset) { throw 'Palworld-Win64-Shipping.exe release asset not found.' }
-          Write-Host "Downloading $($asset.name) size=$($asset.size) digest=$($asset.digest)"
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile Palworld-Win64-Shipping.exe
-          Get-FileHash Palworld-Win64-Shipping.exe -Algorithm SHA256
-          (Get-Item Palworld-Win64-Shipping.exe).Length
+          if (-not (Test-Path PalworldEXE/Palworld-Win64-Shipping.exe)) { throw 'Palworld EXE not found.' }
+          Get-Item PalworldEXE/Palworld-Win64-Shipping.exe | Select-Object FullName,Length
+          Get-FileHash PalworldEXE/Palworld-Win64-Shipping.exe -Algorithm SHA256
 
       - name: Install Capstone
         shell: pwsh
@@ -36,7 +35,7 @@ jobs:
 
       - name: Analyze signatures and xrefs
         shell: pwsh
-        run: python .github/tools/analyze_palworld.py Palworld-Win64-Shipping.exe | Tee-Object analysis.txt
+        run: python .github/tools/analyze_palworld.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object analysis.txt
 
       - name: Upload analysis
         uses: actions/upload-artifact@v4
