@@ -1,0 +1,43 @@
+name: Analyze Palworld Work Suitability Speed Only
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/tools/analyze_speed_path.py'
+      - '.github/workflows/analyze-speed-only.yml'
+      - 'PalworldEXE/Palworld-Win64-Shipping.exe'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze-speed:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository with LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Verify EXE
+        shell: pwsh
+        run: |
+          if (-not (Test-Path PalworldEXE/Palworld-Win64-Shipping.exe)) { throw 'Palworld EXE not found.' }
+          Get-FileHash PalworldEXE/Palworld-Win64-Shipping.exe -Algorithm SHA256
+
+      - name: Install Capstone
+        shell: pwsh
+        run: python -m pip install capstone
+
+      - name: Analyze speed path
+        shell: pwsh
+        run: python .github/tools/analyze_speed_path.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object speed_analysis_only.txt
+
+      - name: Upload speed analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: palworld-speed-analysis
+          path: speed_analysis_only.txt
