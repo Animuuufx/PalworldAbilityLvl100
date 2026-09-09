@@ -119,7 +119,7 @@ static bool patch_byte(u8* at, u8 oldv, u8 newv, const char* why, const Range& t
     VirtualProtect(at, 1, oldp, &tmp);
     FlushInstructionCache(GetCurrentProcess(), at, 1);
     char buf[256];
-    sprintf_s(buf, "[WorkSuitability100 v2.3] PATCH %s RVA=0x%X %02X->%02X", why, (u32)(at - base), oldv, newv);
+    sprintf_s(buf, "[WorkSuitability100 v2.4] PATCH %s RVA=0x%X %02X->%02X", why, (u32)(at - base), oldv, newv);
     log_line(buf);
     st.changed++;
     return true;
@@ -195,39 +195,39 @@ static PatchStats scan_raw_rank_patterns(u8* fn, u8* base, const Range& text, u3
         while (pref < 2 && (p[pref] >= 0x40 && p[pref] <= 0x4F)) pref++;
         u8 o = p[pref];
 
-        if (o == 0x83 && pref + 2 < max) {
+        if (o == 0x83) {
             u8 modrm = p[pref + 1];
             if (((modrm >> 3) & 7) == 7) {
                 u32 ml = modrm_len(p + pref + 1, true);
                 u32 io = pref + 1 + ml;
                 if (io < max && p[io] == 0x0A) {
-                    if (patch_byte(p + io, 0x0A, 0x64, "raw cmp r/m32,10", text, base, st)) return st;
+                    patch_byte(p + io, 0x0A, 0x64, "raw cmp r/m32,10", text, base, st);
                 }
             }
         }
 
-        if (o == 0x81 && pref + 5 < max) {
+        if (o == 0x81) {
             u8 modrm = p[pref + 1];
             if (((modrm >> 3) & 7) == 7) {
                 u32 ml = modrm_len(p + pref + 1, true);
                 u32 io = pref + 1 + ml;
-                if (io + 4 < max && p[io] == 0x0A && p[io+1] == 0 && p[io+2] == 0 && p[io+3] == 0) {
-                    if (patch_byte(p + io, 0x0A, 0x64, "raw cmp r/m32,10", text, base, st)) return st;
+                if (io + 3 < max && p[io] == 0x0A && p[io+1] == 0 && p[io+2] == 0 && p[io+3] == 0) {
+                    patch_byte(p + io, 0x0A, 0x64, "raw cmp r/m32,10", text, base, st);
                 }
             }
         }
 
-        if (o == 0x3D && pref + 5 < max && p[pref + 1] == 0x0A && p[pref + 2] == 0 && p[pref + 3] == 0 && p[pref + 4] == 0) {
-            if (patch_byte(p + pref + 1, 0x0A, 0x64, "raw cmp eax,10", text, base, st)) return st;
+        if (o == 0x3D && pref + 4 < max && p[pref + 1] == 0x0A && p[pref + 2] == 0 && p[pref + 3] == 0 && p[pref + 4] == 0) {
+            patch_byte(p + pref + 1, 0x0A, 0x64, "raw cmp eax,10", text, base, st);
         }
 
-        if (o >= 0xB8 && o <= 0xBF && pref + 5 < max && p[pref + 1] == 0x0A && p[pref + 2] == 0 && p[pref + 3] == 0 && p[pref + 4] == 0) {
+        if (o >= 0xB8 && o <= 0xBF && pref + 4 < max && p[pref + 1] == 0x0A && p[pref + 2] == 0 && p[pref + 3] == 0 && p[pref + 4] == 0) {
             bool nearRet = false;
             for (u32 j = pref + 5; j < pref + 13 && j < max; j++) {
                 if (p[j] == 0xC3 || p[j] == 0xC2) { nearRet = true; break; }
             }
             if (max_fn || nearRet) {
-                if (patch_byte(p + pref + 1, 0x0A, 0x64, "raw mov rank max,10", text, base, st)) return st;
+                patch_byte(p + pref + 1, 0x0A, 0x64, "raw mov rank max,10", text, base, st);
             }
         }
     }
@@ -257,10 +257,12 @@ static PatchStats scan_function(u8* fn, u8* base, const Range& text, u32 limit, 
     u32 start = (u32)(fn - base);
     if (!visited.insert(start).second) return st;
 
-    // First use a byte-level search for the exact rank-cap encodings. The previous
-    // lightweight decoder could desynchronise on an instruction it did not know.
-    st = scan_raw_rank_patterns(fn, base, text, std::min<u32>(limit, 8192), max_fn);
-    if (st.changed || st.already) return st;
+    // Do not stop after the first patch. A single native path can contain
+    // multiple independent rank clamps (max-rank return, upgrade gate,
+    // result normalization, etc.).
+    auto raw = scan_raw_rank_patterns(fn, base, text, std::min<u32>(limit, 8192), max_fn);
+    st.changed += raw.changed;
+    st.already += raw.already;
 
     u8* p = fn;
     u32 off = 0;
@@ -307,7 +309,6 @@ static PatchStats scan_function(u8* fn, u8* base, const Range& text, u32 limit, 
         if (op == 0xC3 || op == 0xC2) break;
         off += l;
         p += l;
-        if (st.changed) break;
     }
     return st;
 }
@@ -317,18 +318,17 @@ static PatchStats patch_named(u8* base, u32 image, const Range& text, const char
     PatchStats total{};
     auto cs = collect_candidates(base, image, text, name);
     char b[256];
-    sprintf_s(b, "[WorkSuitability100 v2.3] %s candidates=%zu", name, cs.size());
+    sprintf_s(b, "[WorkSuitability100 v2.4] %s candidates=%zu", name, cs.size());
     log_line(b);
     for (size_t i = 0; i < std::min<size_t>(cs.size(), 12); i++) {
         auto c = cs[i];
         u8* impl = resolve_lazy(c.fn, text, base);
-        sprintf_s(b, "[WorkSuitability100 v2.3] %s candidate=0x%X impl=0x%X refs=%u", name, c.rva, (u32)(impl - base), c.hits);
+        sprintf_s(b, "[WorkSuitability100 v2.4] %s candidate=0x%X impl=0x%X refs=%u", name, c.rva, (u32)(impl - base), c.hits);
         log_line(b);
         std::unordered_set<u32> visited;
         auto st = scan_function(impl, base, text, 8192, max_fn, 0, visited);
         total.changed += st.changed;
         total.already += st.already;
-        if (total.changed || total.already) break;
     }
     return total;
 }
@@ -339,11 +339,11 @@ static bool apply_patch()
     if (!base) return false;
     Range text{}; u32 image = 0;
     if (!get_ranges(base, text, image)) {
-        log_line("[WorkSuitability100 v2.3] ERROR: PE/.text discovery failed.");
+        log_line("[WorkSuitability100 v2.4] ERROR: PE/.text discovery failed.");
         return false;
     }
     char b[256];
-    sprintf_s(b, "[WorkSuitability100 v2.3] module=%p .text RVA=0x%X size=0x%X image=0x%X", base, text.rva, text.size, image);
+    sprintf_s(b, "[WorkSuitability100 v2.4] module=%p .text RVA=0x%X size=0x%X image=0x%X", base, text.rva, text.size, image);
     log_line(b);
     PatchStats max = patch_named(base, image, text, "WorkSuitabilityMaxRank", true);
     PatchStats gate = patch_named(base, image, text, "CanUseTargetWorkSuitabilityRankUp", false);
@@ -352,13 +352,13 @@ static bool apply_patch()
     PatchStats has = patch_named(base, image, text, "HasWorkSuitabilityRank", false);
     u32 changed = max.changed + gate.changed + rank.changed + rank2.changed + has.changed;
     u32 already = max.already + gate.already + rank.already + rank2.already + has.already;
-    sprintf_s(b, "[WorkSuitability100 v2.3] RESULT changed=%u already100=%u", changed, already);
+    sprintf_s(b, "[WorkSuitability100 v2.4] RESULT changed=%u already100=%u", changed, already);
     log_line(b);
     if (changed >= 1 || (max.already >= 1 && gate.already >= 1)) {
-        log_line("[WorkSuitability100 v2.3] Compatibility initialization successful.");
+        log_line("[WorkSuitability100 v2.4] Compatibility initialization successful.");
         return true;
     }
-    log_line("[WorkSuitability100 v2.3] ERROR: relevant rank logic was found but no validated level-10/100 transition was established.");
+    log_line("[WorkSuitability100 v2.4] ERROR: relevant rank logic was found but no validated level-10/100 transition was established.");
     return false;
 }
 
@@ -380,7 +380,7 @@ extern "C" __declspec(dllexport) int luaopen_WorkSuitability100(void*)
     if (g_initialized) return 0;
     g_initialized = true;
     init_log();
-    log_line("[WorkSuitability100 v2.3] Loaded through Lua package.loadlib.");
+    log_line("[WorkSuitability100 v2.4] Loaded through Lua package.loadlib.");
     g_patched = apply_patch();
     return 0;
 }
