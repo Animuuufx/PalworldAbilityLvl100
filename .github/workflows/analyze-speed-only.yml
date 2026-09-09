@@ -4,9 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/tools/analyze_speed_path.py'
-      - '.github/tools/analyze_speed_targets.py'
-      - '.github/tools/analyze_speed_native.py'
+      - '.github/tools/analyze_native_lookup.py'
       - '.github/workflows/analyze-speed-only.yml'
       - 'PalworldEXE/Palworld-Win64-Shipping.exe'
   workflow_dispatch:
@@ -39,19 +37,24 @@ jobs:
         shell: pwsh
         run: python -m pip install capstone
 
-      - name: Analyze native speed path
+      - name: Run validated native lookup analysis
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path WorkSuitability100/analysis | Out-Null
-          python .github/tools/analyze_speed_native.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object WorkSuitability100/analysis/speed_native.txt
+          python .github/tools/analyze_native_lookup.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object WorkSuitability100/analysis/native_lookup.txt
 
-      - name: Commit analysis report
+      - name: Extract speed-focused section
+        shell: pwsh
+        run: |
+          Get-Content WorkSuitability100/analysis/native_lookup.txt | Select-String -Pattern 'GetCraftSpeedByWorkSuitability|SPEED_TARGETS:|FOCUSED_CURRENT_WORKSUITABILITY:|END_NATIVE_ANALYSIS|FUNCTION RVA=0x295|FUNCTION RVA=0x296|FOCUS_FUNCTION RVA=0x295|FOCUS_FUNCTION RVA=0x296' -Context 0,80 | Out-File WorkSuitability100/analysis/speed_native.txt -Encoding utf8
+
+      - name: Commit native analysis
         shell: pwsh
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add WorkSuitability100/analysis/speed_native.txt
+          git add WorkSuitability100/analysis/native_lookup.txt WorkSuitability100/analysis/speed_native.txt
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 0) { exit 0 }
-          git commit -m 'chore: update native work speed analysis'
+          git commit -m 'chore: update native speed analysis'
           git push
