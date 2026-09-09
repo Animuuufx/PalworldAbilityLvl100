@@ -1,49 +1,36 @@
-local VERSION = "v0.2"
+local VERSION = "v0.3"
 
-local HOOK = "/Script/Pal.PalUtility:CanUseTargetWorkSuitabilityRankUp"
+local CAN_USE_HOOK = "/Script/Pal.PalUtility:CanUseTargetWorkSuitabilityRankUp"
+local ADD_RANK_HOOK = "/Script/Pal.PalIndividualCharacterParameter:SetWorkSuitabilityAddRank"
 
--- Applied handbook item suffix -> the actual suitability property stored on
--- UPalIndividualCharacterParameter.  The native handbook transaction can
--- then perform its normal +1 rank operation after we seed a missing entry.
-local handbook_properties = {
-    EmitFlame = "WorkSuitability_EmitFlame",
-    Watering = "WorkSuitability_Watering",
-    Seeding = "WorkSuitability_Seeding",
-    GenerateElectricity = "WorkSuitability_GenerateElectricity",
-    Handcraft = "WorkSuitability_Handcraft",
-    Collection = "WorkSuitability_Collection",
-    Deforest = "WorkSuitability_Deforest",
-    Mining = "WorkSuitability_Mining",
-    ProductMedicine = "WorkSuitability_ProductMedicine",
-    Cool = "WorkSuitability_Cool",
-    Transport = "WorkSuitability_Transport",
-    MonsterFarm = "WorkSuitability_MonsterFarm",
+local handbook_codes = {
+    EmitFlame = true,
+    Watering = true,
+    Seeding = true,
+    GenerateElectricity = true,
+    Handcraft = true,
+    Collection = true,
+    Deforest = true,
+    Mining = true,
+    ProductMedicine = true,
+    Cool = true,
+    Transport = true,
+    MonsterFarm = true,
 }
 
 local function unwrap(value)
-    if value == nil then
-        return nil
-    end
-
+    if value == nil then return nil end
     local ok, result = pcall(function()
-        if value.get then
-            return value:get()
-        end
+        if value.get then return value:get() end
         return value
     end)
-
     return ok and result or nil
 end
 
 local function full_name(value)
     local object = unwrap(value)
-    if not object then
-        return "<nil>"
-    end
-
-    local ok, name = pcall(function()
-        return object:GetFullName()
-    end)
+    if not object then return "<nil>" end
+    local ok, name = pcall(function() return object:GetFullName() end)
     return ok and tostring(name) or "<unnamed>"
 end
 
@@ -52,78 +39,55 @@ local function handbook_code(value)
     return name:match("WorkSuitability_AddTicket_([%w_]+)")
 end
 
-local function seed_missing_suitability(parameter, property_name, code)
-    -- Database/default Pal parameters use an integer rank of 0 to mean that
-    -- the Pal does not currently possess that work suitability.  Setting the
-    -- reflected parameter to rank 1 before the native handbook eligibility
-    -- check lets the game's normal handbook path recognize and rank it up.
-    local current_ok, current = pcall(function()
-        return tonumber(parameter[property_name])
-    end)
+print("[WorkSuitabilityUnlock " .. VERSION .. "] Loading.")
+print("[WorkSuitabilityUnlock " .. VERSION .. "] Eligibility hook: " .. CAN_USE_HOOK)
+print("[WorkSuitabilityUnlock " .. VERSION .. "] Rank mutation hook: " .. ADD_RANK_HOOK)
 
-    if not current_ok then
-        print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: unable to read " .. property_name)
-        return false
+-- The previous versions tried to write WorkSuitability_* directly. Those are
+-- not the handbook's persistent add-rank storage. Palworld exposes the actual
+-- mutation as SetWorkSuitabilityAddRank(EPalWorkSuitability, int32), and the
+-- resulting save data is represented by GotWorkSuitabilityAddRankList.
+--
+-- Therefore we no longer manufacture reflected properties. We let the native
+-- transaction perform the real mutation and only remove the eligibility gate.
+local can_use_pre, can_use_post = RegisterHook(CAN_USE_HOOK, function(Context, IndividualParameter, Item)
+    local code = handbook_code(Item)
+    if not code or not handbook_codes[code] then
+        return nil
     end
 
-    current = current or 0
-    if current > 0 then
-        return false
-    end
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Handbook eligibility override: " .. code)
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Target parameter: " .. full_name(IndividualParameter))
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Item: " .. full_name(Item))
 
-    local write_ok, write_err = pcall(function()
-        parameter[property_name] = 1
-    end)
-
-    if not write_ok then
-        print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: failed to seed " .. property_name .. ": " .. tostring(write_err))
-        return false
-    end
-
-    local verify_ok, verify = pcall(function()
-        return tonumber(parameter[property_name])
-    end)
-
-    if not verify_ok or (verify or 0) < 1 then
-        print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: " .. property_name .. " did not verify after write.")
-        return false
-    end
-
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Added missing suitability: " .. code .. " -> " .. property_name .. " = " .. tostring(verify))
+    -- This function returns bool. Returning true is intentional: the native
+    -- handbook code must be allowed to continue into SetWorkSuitabilityAddRank.
     return true
+end)
+
+if can_use_pre and can_use_post then
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Eligibility hook registered. PreId=" .. tostring(can_use_pre) .. " PostId=" .. tostring(can_use_post))
+else
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: eligibility hook registration failed.")
 end
 
-print("[WorkSuitabilityUnlock " .. VERSION .. "] Loading.")
-print("[WorkSuitabilityUnlock " .. VERSION .. "] Hook target: " .. HOOK)
+-- Observe the actual persistent mutation. This also gives us a definitive
+-- signal that the handbook made it past the eligibility check.
+local add_pre, add_post = RegisterHook(ADD_RANK_HOOK, function(Context, WorkSuitability, AddRank)
+    local target = unwrap(Context)
+    local suitability = unwrap(WorkSuitability)
+    local amount = unwrap(AddRank)
 
-local pre_id, post_id = RegisterHook(HOOK, function(Context, IndividualParameter, Item)
-    local code = handbook_code(Item)
-    local property_name = code and handbook_properties[code] or nil
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] SetWorkSuitabilityAddRank called: target=" .. full_name(target) .. " suitability=" .. tostring(suitability) .. " addRank=" .. tostring(amount))
 
-    if not property_name then
-        return nil
-    end
-
-    local parameter = unwrap(IndividualParameter)
-    if not parameter then
-        print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: target parameter is unavailable for " .. code)
-        return nil
-    end
-
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Handbook detected: " .. code)
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Target: " .. full_name(parameter))
-
-    -- Only seed a missing suitability. Existing suitabilities are untouched;
-    -- their normal native handbook rank-up behavior remains unchanged.
-    seed_missing_suitability(parameter, property_name, code)
-
-    -- Do not override the native boolean result. The original function must
-    -- evaluate the now-present suitability and continue the normal transaction.
+    -- Do not replace the native mutation. Palworld's own implementation is
+    -- responsible for updating the suitability list, delegates, replication,
+    -- and save parameter.
     return nil
 end)
 
-if pre_id and post_id then
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Hook registered successfully. PreId=" .. tostring(pre_id) .. " PostId=" .. tostring(post_id))
+if add_pre and add_post then
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Rank mutation hook registered. PreId=" .. tostring(add_pre) .. " PostId=" .. tostring(add_post))
 else
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: failed to register handbook eligibility hook.")
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: rank mutation hook registration failed.")
 end
