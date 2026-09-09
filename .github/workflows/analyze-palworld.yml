@@ -1,6 +1,11 @@
 name: Analyze Palworld EXE
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/tools/analyze_palworld.py'
+      - '.github/workflows/analyze-palworld.yml'
   workflow_dispatch:
 
 permissions:
@@ -20,6 +25,7 @@ jobs:
           $release = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'Aera-Palworld-Analyzer' }
           $asset = $release.assets | Where-Object { $_.name -eq 'Palworld-Win64-Shipping.exe' } | Select-Object -First 1
           if (-not $asset) { throw 'Palworld-Win64-Shipping.exe release asset not found.' }
+          Write-Host "Downloading $($asset.name) size=$($asset.size) digest=$($asset.digest)"
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile Palworld-Win64-Shipping.exe
           Get-FileHash Palworld-Win64-Shipping.exe -Algorithm SHA256
           (Get-Item Palworld-Win64-Shipping.exe).Length
@@ -30,7 +36,7 @@ jobs:
 
       - name: Analyze signatures and xrefs
         shell: pwsh
-        run: python .github/tools/analyze_palworld.py Palworld-Win64-Shipping.exe > analysis.txt
+        run: python .github/tools/analyze_palworld.py Palworld-Win64-Shipping.exe | Tee-Object analysis.txt
 
       - name: Upload analysis
         uses: actions/upload-artifact@v4
