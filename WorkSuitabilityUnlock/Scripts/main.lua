@@ -1,7 +1,9 @@
-local VERSION = "v0.3"
+local VERSION = "v0.4"
 
 local CAN_USE_HOOK = "/Script/Pal.PalUtility:CanUseTargetWorkSuitabilityRankUp"
 local ADD_RANK_HOOK = "/Script/Pal.PalIndividualCharacterParameter:SetWorkSuitabilityAddRank"
+local STATIC_ITEM_HOOK = "/Script/Pal.PalStaticItemDataBase:CanUseItemToCharacter"
+local PROCESSOR_ITEM_HOOK = "/Script/Pal.PalItemUseProcessor:CanUseItemToCharacter"
 
 local handbook_codes = {
     EmitFlame = true,
@@ -39,55 +41,79 @@ local function handbook_code(value)
     return name:match("WorkSuitability_AddTicket_([%w_]+)")
 end
 
-print("[WorkSuitabilityUnlock " .. VERSION .. "] Loading.")
-print("[WorkSuitabilityUnlock " .. VERSION .. "] Eligibility hook: " .. CAN_USE_HOOK)
-print("[WorkSuitabilityUnlock " .. VERSION .. "] Rank mutation hook: " .. ADD_RANK_HOOK)
+local function is_handbook(value)
+    return handbook_codes[handbook_code(value)] == true
+end
 
--- The previous versions tried to write WorkSuitability_* directly. Those are
--- not the handbook's persistent add-rank storage. Palworld exposes the actual
--- mutation as SetWorkSuitabilityAddRank(EPalWorkSuitability, int32), and the
--- resulting save data is represented by GotWorkSuitabilityAddRankList.
---
--- Therefore we no longer manufacture reflected properties. We let the native
--- transaction perform the real mutation and only remove the eligibility gate.
-local can_use_pre, can_use_post = RegisterHook(CAN_USE_HOOK, function(Context, IndividualParameter, Item)
-    local code = handbook_code(Item)
-    if not code or not handbook_codes[code] then
+print("[WorkSuitabilityUnlock " .. VERSION .. "] Loading.")
+print("[WorkSuitabilityUnlock " .. VERSION .. "] Target-selection hooks enabled.")
+
+-- Handbook target selection is checked before the rank-up eligibility path.
+-- Override only the twelve Applied Work Suitability Handbooks so a Pal with
+-- no natural rank in that suitability can still be selected.
+local static_pre, static_post = RegisterHook(STATIC_ITEM_HOOK, function(Context, IndividualParameter)
+    if not is_handbook(Context) then
         return nil
     end
 
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Handbook eligibility override: " .. code)
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Target parameter: " .. full_name(IndividualParameter))
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Item: " .. full_name(Item))
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Item-data target override: " .. handbook_code(Context))
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Target: " .. full_name(IndividualParameter))
+    return true
+end)
 
-    -- This function returns bool. Returning true is intentional: the native
-    -- handbook code must be allowed to continue into SetWorkSuitabilityAddRank.
+if static_pre and static_post then
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Static item target hook registered.")
+else
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] WARNING: static item target hook registration failed.")
+end
+
+local processor_pre, processor_post = RegisterHook(PROCESSOR_ITEM_HOOK, function(Context, IndividualParameter, Item)
+    if not is_handbook(Item) then
+        return nil
+    end
+
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Processor target override: " .. handbook_code(Item))
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Target: " .. full_name(IndividualParameter))
+    return true
+end)
+
+if processor_pre and processor_post then
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Item processor target hook registered.")
+else
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] WARNING: item processor target hook registration failed.")
+end
+
+-- Keep the native rank-up eligibility path permissive as a second layer.
+local can_use_pre, can_use_post = RegisterHook(CAN_USE_HOOK, function(Context, IndividualParameter, Item)
+    if not is_handbook(Item) then
+        return nil
+    end
+
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Handbook eligibility override: " .. handbook_code(Item))
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Target parameter: " .. full_name(IndividualParameter))
     return true
 end)
 
 if can_use_pre and can_use_post then
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Eligibility hook registered. PreId=" .. tostring(can_use_pre) .. " PostId=" .. tostring(can_use_post))
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Rank-up eligibility hook registered.")
 else
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: eligibility hook registration failed.")
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] WARNING: rank-up eligibility hook registration failed.")
 end
 
--- Observe the actual persistent mutation. This also gives us a definitive
--- signal that the handbook made it past the eligibility check.
+-- Do not manufacture reflected WorkSuitability_* values here. The native
+-- SetWorkSuitabilityAddRank implementation owns the persistent add-rank list,
+-- save data, delegates, and replication.
 local add_pre, add_post = RegisterHook(ADD_RANK_HOOK, function(Context, WorkSuitability, AddRank)
     local target = unwrap(Context)
     local suitability = unwrap(WorkSuitability)
     local amount = unwrap(AddRank)
 
     print("[WorkSuitabilityUnlock " .. VERSION .. "] SetWorkSuitabilityAddRank called: target=" .. full_name(target) .. " suitability=" .. tostring(suitability) .. " addRank=" .. tostring(amount))
-
-    -- Do not replace the native mutation. Palworld's own implementation is
-    -- responsible for updating the suitability list, delegates, replication,
-    -- and save parameter.
     return nil
 end)
 
 if add_pre and add_post then
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] Rank mutation hook registered. PreId=" .. tostring(add_pre) .. " PostId=" .. tostring(add_post))
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Rank mutation hook registered.")
 else
-    print("[WorkSuitabilityUnlock " .. VERSION .. "] ERROR: rank mutation hook registration failed.")
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] WARNING: rank mutation hook registration failed.")
 end
