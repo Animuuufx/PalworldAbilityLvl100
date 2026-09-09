@@ -1,10 +1,12 @@
-local VERSION = "v0.8"
+local VERSION = "v0.9"
 
 local CAN_USE_HOOK = "/Script/Pal.PalUtility:CanUseTargetWorkSuitabilityRankUp"
 local ADD_RANK_HOOK = "/Script/Pal.PalIndividualCharacterParameter:SetWorkSuitabilityAddRank"
 local STATIC_ITEM_HOOK = "/Script/Pal.PalStaticItemDataBase:CanUseItemToCharacter"
 local PROCESSOR_ITEM_HOOK = "/Script/Pal.PalItemUseProcessor:CanUseItemToCharacter"
+local SERVER_USE_HOOK = "/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal"
 local SLOT_TARGET_HOOK = "/Script/Pal.PalItemSlot:CanUseItemToCharacter"
+local REQUEST_USE_HOOK = "/Script/Pal.PalItemSlot:RequestUseToCharacter"
 
 local handbook_codes = {
     EmitFlame = true,
@@ -297,6 +299,20 @@ local function initialize_missing_suitability(target, code)
     return ok
 end
 
+local function prepare_target_for_handbook(target, code, source)
+    target = unwrap(target)
+    if not target or not code then return false end
+
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] " .. tostring(source) .. " handbook target: " .. full_name(target) .. " code=" .. code)
+    mark_pending(target, code)
+
+    local ready = initialize_missing_suitability(target, code)
+    if ready then
+        print("[WorkSuitabilityUnlock " .. VERSION .. "] " .. tostring(source) .. " prepared missing suitability: " .. code)
+    end
+    return ready
+end
+
 print("[WorkSuitabilityUnlock " .. VERSION .. "] Loading.")
 print("[WorkSuitabilityUnlock " .. VERSION .. "] Handbook-only suitability unlock enabled.")
 
@@ -314,6 +330,21 @@ if slot_pre and slot_post then
     print("[WorkSuitabilityUnlock " .. VERSION .. "] Slot target hook registered.")
 else
     print("[WorkSuitabilityUnlock " .. VERSION .. "] WARNING: slot target hook registration failed.")
+end
+
+local request_pre, request_post = RegisterHook(REQUEST_USE_HOOK, function(Context, ...)
+    local code = slot_handbook_code(Context)
+    if not code then return nil end
+
+    local target = resolve_target(Context, ...)
+    prepare_target_for_handbook(target, code, "RequestUseToCharacter")
+    return nil
+end)
+
+if request_pre and request_post then
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Request-use handbook hook registered.")
+else
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] WARNING: request-use hook registration failed.")
 end
 
 local static_pre, static_post = RegisterHook(STATIC_ITEM_HOOK, function(Context, ...)
@@ -381,6 +412,38 @@ else
     print("[WorkSuitabilityUnlock " .. VERSION .. "] WARNING: processor hook registration failed.")
 end
 
+local server_pre, server_post = RegisterHook(
+    SERVER_USE_HOOK,
+    function(Context, ...)
+        local item, code = find_handbook(Context, ...)
+        if not code then return nil end
+
+        local target = resolve_target(Context, ...)
+        print("[WorkSuitabilityUnlock " .. VERSION .. "] Server-use handbook detected: " .. code)
+        prepare_target_for_handbook(target, code, "ServerUse")
+
+        -- Do not override the server-use return value. We only make the target
+        -- satisfy the missing-suitability prerequisite before native execution.
+        return nil
+    end,
+    function(Context, ...)
+        local item, code = find_handbook(Context, ...)
+        if not code then return nil end
+
+        local target = resolve_target(Context, ...)
+        if target then
+            print("[WorkSuitabilityUnlock " .. VERSION .. "] Server-use post completed for " .. code .. " target=" .. full_name(target))
+        end
+        return nil
+    end
+)
+
+if server_pre and server_post then
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] Server-use handbook hook registered.")
+else
+    print("[WorkSuitabilityUnlock " .. VERSION .. "] WARNING: server-use handbook hook registration failed.")
+end
+
 local can_use_pre, can_use_post = RegisterHook(CAN_USE_HOOK, function(Context, ...)
     local item, code = find_handbook(Context, ...)
     if not code then return nil end
@@ -390,7 +453,7 @@ local can_use_pre, can_use_post = RegisterHook(CAN_USE_HOOK, function(Context, .
     print("[WorkSuitabilityUnlock " .. VERSION .. "] Eligibility target: " .. full_name(target))
 
     if target then
-        mark_pending(target, code)
+        prepare_target_for_handbook(target, code, "Eligibility")
     end
 
     return true
