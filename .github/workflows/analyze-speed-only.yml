@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/tools/analyze_speed_path.py'
+      - '.github/tools/analyze_speed_targets.py'
       - '.github/workflows/analyze-speed-only.yml'
       - 'PalworldEXE/Palworld-Win64-Shipping.exe'
   workflow_dispatch:
@@ -32,12 +33,12 @@ jobs:
         shell: pwsh
         run: python -m pip install capstone
 
-      - name: Analyze speed path
+      - name: Analyze speed targets
         shell: pwsh
-        run: python .github/tools/analyze_speed_path.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object speed_analysis_only.txt
+        run: python .github/tools/analyze_speed_targets.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object speed_targets.txt
 
       - name: Upload speed analysis
         uses: actions/upload-artifact@v4
         with:
-          name: palworld-speed-analysis
-          path: speed_analysis_only.txt
+          name: palworld-speed-targets
+          path: speed_targets.txt
