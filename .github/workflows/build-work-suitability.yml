@@ -1,60 +1,83 @@
-name: Build WorkSuitability100
+name: Build WorkSuitability100 v2
 
 on:
   push:
     branches: [main]
     paths:
-      - 'WorkSuitability100/Native/WorkSuitability100_v1_7.cpp'
-      - 'WorkSuitability100/Native/patch_v1_7_source.ps1'
+      - 'WorkSuitability100/**'
       - '.github/workflows/build-work-suitability.yml'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  EXE: PalworldEXE/Palworld-Win64-Shipping.exe
+  DLL: WorkSuitability100/Native/WorkSuitability100.dll
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Checkout
+      - name: Checkout with Git LFS
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          lfs: true
+
+      - name: Verify exact Palworld executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:EXE)) { throw "Missing $env:EXE" }
+          $f = Get-Item $env:EXE
+          Write-Host "EXE size: $($f.Length) bytes"
+          if ($f.Length -lt 150000000) { throw "Git LFS did not materialize the Palworld executable." }
+          $hash = (Get-FileHash $env:EXE -Algorithm SHA256).Hash.ToLower()
+          Write-Host "EXE SHA256: $hash"
+          if ($hash -ne '44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443') { throw "Unexpected Palworld executable hash." }
 
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Apply v1.8 source patch
-        shell: pwsh
-        run: |
-          powershell -ExecutionPolicy Bypass -File WorkSuitability100\Native\patch_v1_7_source.ps1
-
-      - name: Build DLL
+      - name: Build native DLL
         shell: cmd
         run: |
           if not exist build mkdir build
-          cl /nologo /LD /O2 /GS- /EHsc- /GR- /std:c++17 WorkSuitability100\Native\WorkSuitability100_v1_7.cpp /Fe:build\WorkSuitability100.dll /link /MACHINE:X64
+          cl /nologo /LD /O2 /GS- /EHsc /GR- /std:c++17 WorkSuitability100\Native\WorkSuitability100_v2.cpp /Fe:build\WorkSuitability100.dll /link /MACHINE:X64
           if errorlevel 1 exit /b 1
 
-      - name: Synchronize with main and stage DLL
+      - name: Stage release files
         shell: pwsh
         run: |
-          git fetch origin main
-          git reset --hard origin/main
-          Copy-Item build/WorkSuitability100.dll WorkSuitability100/Native/WorkSuitability100.dll -Force
-          $sha = (Get-FileHash WorkSuitability100/Native/WorkSuitability100.dll -Algorithm SHA256).Hash.ToLower()
-          "WorkSuitability100.dll SHA256: $sha" | Set-Content WorkSuitability100/Native/BUILD_INFO.txt
-          Get-Item WorkSuitability100/Native/WorkSuitability100.dll | Select-Object FullName,Length
-          git add WorkSuitability100/Native/WorkSuitability100.dll WorkSuitability100/Native/BUILD_INFO.txt
-          git diff --cached --stat
+          New-Item -ItemType Directory -Force -Path WorkSuitability100/Native | Out-Null
+          Copy-Item build/WorkSuitability100.dll $env:DLL -Force
+          $sha = (Get-FileHash $env:DLL -Algorithm SHA256).Hash.ToLower()
+          @(
+            'WorkSuitability100 v2.0'
+            "DLL SHA256: $sha"
+            "Target EXE SHA256: 44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443"
+            'Target EXE size: 161802312'
+            'Build: GitHub Actions / MSVC x64'
+          ) | Set-Content WorkSuitability100/Native/BUILD_INFO.txt
+          Compress-Archive -Path WorkSuitability100 -DestinationPath build/WorkSuitability100-v2.0.zip -Force
 
-      - name: Commit rebuilt DLL
+      - name: Commit built DLL and metadata
         shell: pwsh
         run: |
-          if (git diff --cached --quiet) { exit 0 }
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Build WorkSuitability100 v1.8 [skip ci]'
-          git push origin HEAD:main
+          git add WorkSuitability100/Native/WorkSuitability100.dll WorkSuitability100/Native/BUILD_INFO.txt
+          if (-not (git diff --cached --quiet)) {
+            git commit -m 'Build WorkSuitability100 v2.0 [skip ci]'
+            git push origin HEAD:main
+          } else {
+            Write-Host 'Built output unchanged.'
+          }
+
+      - name: Upload packaged mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkSuitability100-v2.0
+          path: build/WorkSuitability100-v2.0.zip
