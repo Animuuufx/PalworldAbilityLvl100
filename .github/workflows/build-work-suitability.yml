@@ -68,6 +68,18 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+          Copy-Item build/WorkSuitability100.dll $env:DLL -Force
+          $sha = (Get-FileHash $env:DLL -Algorithm SHA256).Hash.ToLower()
+          @(
+            'WorkSuitability100 v2.0'
+            "DLL SHA256: $sha"
+            "Target EXE SHA256: 44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443"
+            'Target EXE size: 161802312'
+            'Build: GitHub Actions / MSVC x64'
+          ) | Set-Content WorkSuitability100/Native/BUILD_INFO.txt
           git add WorkSuitability100/Native/WorkSuitability100.dll WorkSuitability100/Native/BUILD_INFO.txt
           if (-not (git diff --cached --quiet)) {
             git commit -m 'Build WorkSuitability100 v2.0 [skip ci]'
