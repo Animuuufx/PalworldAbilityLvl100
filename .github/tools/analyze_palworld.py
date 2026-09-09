@@ -1,9 +1,10 @@
 import sys, struct
 from pathlib import Path
-from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+from capstone import Cs, CS_ARCH_X86, CS_MODE_64, x86_const
 
 def u16(d,o): return struct.unpack_from('<H',d,o)[0]
 def u32(d,o): return struct.unpack_from('<I',d,o)[0]
+def u64(d,o): return struct.unpack_from('<Q',d,o)[0]
 def parse_sections(d):
     pe=u32(d,0x3c); assert d[pe:pe+4]==b'PE\0\0'
     c=pe+4; n=u16(d,c+2); os=u16(d,c+16); so=c+20+os; out=[]
@@ -35,7 +36,7 @@ def refs_to_rva(d,secs,base,target_rva,only_text=False):
     for sn,va,rs,rp,vs,ch in wanted:
         for ins in md.disasm(d[rp:rp+rs],base+va):
             for op in ins.operands:
-                if op.type==3 and op.mem.base==41:
+                if op.type==3 and op.mem.base==x86_const.X86_REG_RIP:
                     target=ins.address+ins.size+op.mem.disp-base
                     if target==target_rva: out.append((ins.address-base,ins.mnemonic,ins.op_str))
     return out
@@ -44,6 +45,23 @@ def pointer_xrefs(d,secs,base,target_rva):
     p=struct.pack('<Q',base+target_rva); out=[]
     for sn,va,rs,rp,vs,ch in secs:
         for off in findall(d[rp:rp+rs],p): out.append((va+off,sn))
+    return out
+
+def text_rva(rva,secs):
+    for n,va,rs,rp,vs,ch in secs:
+        if n=='.text' and va<=rva<va+rs:return True
+    return False
+
+def metadata_pointer_candidates(d,secs,base,ptr_rva,window=0x180):
+    fo=rva_to_file(ptr_rva,secs)
+    if fo is None:return []
+    lo=max(0,fo-window); hi=min(len(d),fo+window)
+    out=[]
+    for off in range(lo,hi-7,8):
+        v=u64(d,off)
+        if v<base: continue
+        r=v-base
+        if text_rva(r,secs): out.append((fo_to_rva(off,secs),r))
     return out
 
 def nearby_bytes(d,secs,rva,n=192):
@@ -64,13 +82,11 @@ def main():
             r=fo_to_rva(fo,secs)
             if r is not None:rvas.append(r)
         print(f'  {name.decode()}: '+(', '.join(f'FILE=0x{fo:X}/RVA=0x{fo_to_rva(fo,secs):X}' for fo in hits[:32]) or 'NOT_FOUND'))
-        for r in rvas[:32]:
-            target_rvas.append((name.decode(),r))
+        for r in rvas[:32]: target_rvas.append((name.decode(),r))
     print('STRING_XREFS_ALL_SECTIONS:')
     for name,r in target_rvas:
         refs=refs_to_rva(d,secs,base,r,False)
-        if refs:
-            print(f'  {name} RVA=0x{r:X}: '+', '.join(f'0x{x:X} {m} {o}' for x,m,o in refs[:64]))
+        if refs: print(f'  {name} RVA=0x{r:X}: '+', '.join(f'0x{x:X} {m} {o}' for x,m,o in refs[:64]))
     print('STRING_XREFS_TEXT_ONLY:')
     for name,r in target_rvas:
         refs=refs_to_rva(d,secs,base,r,True)
@@ -81,6 +97,15 @@ def main():
     for name,r in target_rvas:
         hits=pointer_xrefs(d,secs,base,r)
         if hits: print(f'  {name} RVA=0x{r:X}: '+', '.join(f'0x{x:X}({s})' for x,s in hits[:128]))
+    print('METADATA_NATIVE_POINTER_CANDIDATES:')
+    seen=set()
+    for name,r in target_rvas:
+        for ptr_rva,sec in pointer_xrefs(d,secs,base,r):
+            for at,fn in metadata_pointer_candidates(d,secs,base,ptr_rva):
+                key=(name,ptr_rva,at,fn)
+                if key in seen: continue
+                seen.add(key)
+                print(f'  {name} nameptr=0x{ptr_rva:X} candidate_ptr=0x{at:X} native=0x{fn:X}')
     print('RANK_IMMEDIATE_CONTEXT:')
     pats=[b'\x83\xF8\x0A',b'\x83\xF9\x0A',b'\x83\xFA\x0A',b'\x83\xFB\x0A',b'\x83\xFF\x0A',b'\x41\x83\xF8\x0A',b'\x41\x83\xF9\x0A',b'\x41\x83\xFA\x0A']
     for p in pats:
