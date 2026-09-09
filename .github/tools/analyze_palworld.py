@@ -19,89 +19,86 @@ def findall(d,p):
         i=d.find(p,s)
         if i<0:return
         yield i; s=i+1
-def hx(b): return ' '.join(f'{x:02X}' for x in b)
 def fo_to_rva(fo,secs):
     for n,va,rs,rp,vs,ch in secs:
         if rp<=fo<rp+rs:return va+(fo-rp)
     return None
+def rva_to_file(rva,secs):
+    for n,va,rs,rp,vs,ch in secs:
+        if va<=rva<va+rs:return rp+(rva-va)
+    return None
+def hx(b): return ' '.join(f'{x:02X}' for x in b)
+
+def refs_to_rva(d,secs,base,target_rva,only_text=False):
+    md=Cs(CS_ARCH_X86,CS_MODE_64); md.detail=True; out=[]
+    wanted=[s for s in secs if (not only_text or (s[5]&0x20000000))]
+    for sn,va,rs,rp,vs,ch in wanted:
+        for ins in md.disasm(d[rp:rp+rs],base+va):
+            for op in ins.operands:
+                if op.type==3 and op.mem.base==41:
+                    target=ins.address+ins.size+op.mem.disp-base
+                    if target==target_rva: out.append((ins.address-base,ins.mnemonic,ins.op_str))
+    return out
+
+def pointer_xrefs(d,secs,base,target_rva):
+    p=struct.pack('<Q',base+target_rva); out=[]
+    for sn,va,rs,rp,vs,ch in secs:
+        for off in findall(d[rp:rp+rs],p): out.append((va+off,sn))
+    return out
+
+def nearby_bytes(d,secs,rva,n=192):
+    fo=rva_to_file(rva,secs)
+    return hx(d[max(0,fo-n):min(len(d),fo+n)]) if fo is not None else ''
 
 def main():
     if len(sys.argv)!=2: raise SystemExit('usage: analyze_palworld.py Palworld-Win64-Shipping.exe')
     d=Path(sys.argv[1]).read_bytes(); pe,secs=parse_sections(d); base=image_base(d,pe)
     print(f'FILE_SIZE={len(d)}'); print(f'IMAGE_BASE=0x{base:X}')
     for s in secs: print(f'SECTION {s[0]} RVA=0x{s[1]:X} RAW=0x{s[3]:X} RSZ=0x{s[2]:X}')
-    exe=[s for s in secs if s[5]&0x20000000]
-    old={'MAP_ORIGINAL':'44 8B 88 54 0F 00 00','SCALAR_ORIGINAL':'8B 88 54 0F 00 00','HANDBOOK_ELIG_ORIGINAL':'3B B8 54 0F 00 00','HANDBOOK_USE_ORIGINAL':'39 83 54 0F 00 00 0F 8C 80 00 00 00','SPEED_PROLOGUE':'48 89 5C 24 18 48 89 74 24 20 55 57 41 54'}
-    print('OLD_SIGNATURES:')
-    for n,h in old.items():
-        hs=[]; p=bytes.fromhex(h)
-        for sn,va,rs,rp,vs,ch in exe:
-            for off in findall(d[rp:rp+rs],p): hs.append(va+off)
-        print(f'  {n}: '+(', '.join(f'0x{x:X}' for x in hs[:64]) or 'NOT_FOUND'))
-
-    md=Cs(CS_ARCH_X86,CS_MODE_64); md.detail=True
-    targets=[b'GetCraftSpeedByWorkSuitability',b'CanUseTargetWorkSuitabilityRankUp']
+    print('TARGETS:')
+    names=[b'GetCraftSpeedByWorkSuitability',b'CanUseTargetWorkSuitabilityRankUp',b'WorkSuitabilityMaxRank',b'GetWorkSuitabilityRank',b'GetWorkSuitabilityRankWithCharacterRank',b'HasWorkSuitabilityRank',b'GetCraftSpeed_WorkSuitability']
     target_rvas=[]
-    print('TARGET_STRINGS:')
-    for t in targets:
-        hs=list(findall(d,t))
-        print(f'  {t.decode()}: '+(', '.join(f'FILE=0x{x:X} RVA=0x{fo_to_rva(x,secs):X}' for x in hs[:32]) if hs else 'NOT_FOUND'))
-        for x in hs:
-            r=fo_to_rva(x,secs)
-            if r is not None: target_rvas.append(r)
-        wt=t.decode().encode('utf-16le'); hs2=list(findall(d,wt))
-        print(f'  UTF16 {t.decode()}: '+(', '.join(f'FILE=0x{x:X} RVA=0x{fo_to_rva(x,secs):X}' for x in hs2[:32]) if hs2 else 'NOT_FOUND'))
-        for x in hs2:
-            r=fo_to_rva(x,secs)
-            if r is not None: target_rvas.append(r)
-    target_rvas=set(target_rvas)
-
-    print('WORK_SUITABILITY_STRINGS:')
-    seen_strings=set()
-    for needle in (b'WorkSuitability', b'Work Suitability', b'CraftSpeed'):
-        for x in findall(d,needle):
-            if x in seen_strings: continue
-            seen_strings.add(x)
-            r=fo_to_rva(x,secs)
-            if r is not None:
-                lo=max(0,x-96); hi=min(len(d),x+192)
-                parts=d[lo:hi].split(b'\0')
-                printable=[q.decode('ascii','replace') for q in parts if len(q)>=8 and all(32<=c<127 for c in q)]
-                print(f'  FILE=0x{x:X} RVA=0x{r:X} NEEDLE={needle.decode()}: ' + ' | '.join(printable[:8]))
-
-    print('TARGET_STRING_XREFS:')
-    refs=[]
-    for sn,va,rs,rp,vs,ch in exe:
-        for ins in md.disasm(d[rp:rp+rs],base+va):
-            for operand in ins.operands:
-                if operand.type==3 and operand.mem.base==41:
-                    target=ins.address+ins.size+operand.mem.disp-base
-                    if target in target_rvas:
-                        refs.append((ins.address-base,target)); print(f'  RVA=0x{ins.address-base:X} {ins.mnemonic} {ins.op_str} -> RVA=0x{target:X}')
-
-    print('TARGET_POINTER_XREFS:')
-    for tr in sorted(target_rvas):
-        p=struct.pack('<Q',base+tr); hits=[]
-        for sn,va,rs,rp,vs,ch in exe:
-            for off in findall(d[rp:rp+rs],p): hits.append(va+off)
-        print(f'  TARGET_RVA=0x{tr:X}: '+(', '.join(f'0x{x:X}' for x in hits[:64]) or 'NOT_FOUND'))
-
-    print('XREF_NEIGHBORHOODS:')
-    seen=set()
-    for rva,_ in refs:
-        start=max(0x1000,rva-0x100)
-        if start in seen: continue
-        seen.add(start)
-        for sn,va,rs,rp,vs,ch in exe:
-            if va<=start<va+rs:
-                off=rp+(start-va); print(f'  START_RVA=0x{start:X} {sn}: {hx(d[off:off+384])}'); break
-
-    print('RANK_10_PATTERNS:')
-    pats=[bytes.fromhex(x) for x in ['83 F8 0A','83 F9 0A','83 FA 0A','83 FB 0A','83 FF 0A','41 83 F8 0A','41 83 F9 0A','41 83 FA 0A','B8 0A 00 00 00','B9 0A 00 00 00','BA 0A 00 00 00','BF 0A 00 00 00']]
+    for name in names:
+        hits=list(findall(d,name)); rvas=[]
+        for fo in hits:
+            r=fo_to_rva(fo,secs)
+            if r is not None:rvas.append(r)
+        print(f'  {name.decode()}: '+(', '.join(f'FILE=0x{fo:X}/RVA=0x{fo_to_rva(fo,secs):X}' for fo in hits[:32]) or 'NOT_FOUND'))
+        for r in rvas[:32]:
+            target_rvas.append((name.decode(),r))
+    print('STRING_XREFS_ALL_SECTIONS:')
+    for name,r in target_rvas:
+        refs=refs_to_rva(d,secs,base,r,False)
+        if refs:
+            print(f'  {name} RVA=0x{r:X}: '+', '.join(f'0x{x:X} {m} {o}' for x,m,o in refs[:64]))
+    print('STRING_XREFS_TEXT_ONLY:')
+    for name,r in target_rvas:
+        refs=refs_to_rva(d,secs,base,r,True)
+        if refs:
+            print(f'  {name} RVA=0x{r:X}: '+', '.join(f'0x{x:X} {m} {o}' for x,m,o in refs[:64]))
+            for x,m,o in refs[:16]: print(f'    NEAR 0x{x:X}: {nearby_bytes(d,secs,x)}')
+    print('STRING_POINTER_XREFS:')
+    for name,r in target_rvas:
+        hits=pointer_xrefs(d,secs,base,r)
+        if hits: print(f'  {name} RVA=0x{r:X}: '+', '.join(f'0x{x:X}({s})' for x,s in hits[:128]))
+    print('RANK_IMMEDIATE_CONTEXT:')
+    pats=[b'\x83\xF8\x0A',b'\x83\xF9\x0A',b'\x83\xFA\x0A',b'\x83\xFB\x0A',b'\x83\xFF\x0A',b'\x41\x83\xF8\x0A',b'\x41\x83\xF9\x0A',b'\x41\x83\xFA\x0A']
     for p in pats:
-        hs=[]
-        for sn,va,rs,rp,vs,ch in exe:
-            for off in findall(d[rp:rp+rs],p): hs.append((va+off,sn))
-        print(f'  {hx(p)}: '+(', '.join(f'0x{x:X}({s})' for x,s in hs[:160]) or 'NOT_FOUND'))
+        hits=[]
+        for sn,va,rs,rp,vs,ch in secs:
+            if not (ch&0x20): continue
+            for off in findall(d[rp:rp+rs],p): hits.append(va+off)
+        print(f'  {hx(p)}: '+', '.join(f'0x{x:X}' for x in hits[:80]))
+        for x in hits[:12]: print(f'    NEAR 0x{x:X}: {nearby_bytes(d,secs,x,96)}')
+    print('RANK_100_IMMEDIATE_CONTEXT:')
+    pats=[b'\x83\xF8\x64',b'\x83\xF9\x64',b'\x83\xFA\x64',b'\x83\xFB\x64',b'\x83\xFF\x64',b'\xB8\x64\x00\x00\x00',b'\xB9\x64\x00\x00\x00',b'\xBA\x64\x00\x00\x00',b'\xBF\x64\x00\x00\x00']
+    for p in pats:
+        hits=[]
+        for sn,va,rs,rp,vs,ch in secs:
+            if not (ch&0x20): continue
+            for off in findall(d[rp:rp+rs],p): hits.append(va+off)
+        if hits:
+            print(f'  {hx(p)}: '+', '.join(f'0x{x:X}' for x in hits[:80]))
+            for x in hits[:12]: print(f'    NEAR 0x{x:X}: {nearby_bytes(d,secs,x,96)}')
 
 if __name__=='__main__': main()
