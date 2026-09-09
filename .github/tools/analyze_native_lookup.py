@@ -23,8 +23,7 @@ def rva_to_fo(rva,ss):
         if va<=rva<va+rs:return rp+(rva-va)
     return None
 
-def in_text(rva,ss):
-    return any(n=='.text' and va<=rva<va+rs for n,va,rs,rp,vs,ch in ss)
+def in_text(rva,ss): return any(n=='.text' and va<=rva<va+rs for n,va,rs,rp,vs,ch in ss)
 
 def findall(d,p):
     s=0
@@ -58,7 +57,7 @@ def native_candidates(d,ss,base,names):
                         print(f'{name.decode()} string_rva=0x{r:X} pair_rva=0x{fo_to_rva(pair,ss):X} native_rva=0x{native:X}{tag}')
     return candidates
 
-def disasm_function(d,ss,base,rva,limit=768):
+def disasm_function(d,ss,base,rva,limit=2048):
     fo=rva_to_fo(rva,ss)
     if fo is None: return
     md=Cs(CS_ARCH_X86,CS_MODE_64); md.detail=True
@@ -66,16 +65,14 @@ def disasm_function(d,ss,base,rva,limit=768):
     print(f'FOCUS_FUNCTION RVA=0x{rva:X} FILE=0x{fo:X}')
     for i in ins:
         rel=i.address-(base+rva)
+        op=i.op_str.lower()
         text=f'+0x{rel:03X}: {i.mnemonic} {i.op_str}'.rstrip()
-        if ('0xa' in i.op_str.lower() or '0x64' in i.op_str.lower() or
-            i.mnemonic in ('cmp','mov','lea','add','sub','test','and','or','call','jmp','je','jne','jg','jge','jl','jle','ja','jae','jb','jbe','ret')):
+        if i.mnemonic in ('cmp','mov','lea','add','sub','imul','idiv','div','test','and','or','xor','shl','shr','sar','call','jmp','je','jne','jg','jge','jl','jle','ja','jae','jb','jbe','seta','setae','setb','setbe','sete','setne','cmovg','cmovge','cmovl','cmovle','cmova','cmovae','cmovb','cmovbe','cmove','cmovne','ret') or '0xa' in op:
             print('  '+text)
-    # Raw bytes around every immediate-10 instruction.
     for i in ins:
         if '0xa' not in i.op_str.lower(): continue
         rel=i.address-(base+rva)
-        start=max(0,i.address-(base+rva)-12)
-        end=min(len(d)-fo,i.address-(base+rva)+20)
+        start=max(0,rel-24); end=min(len(d)-fo,rel+40)
         b=d[fo+start:fo+end]
         print('  IMM10_BYTES +0x%03X: %s' % (rel,b.hex(' ')))
     print('END_FOCUS_FUNCTION')
@@ -91,22 +88,17 @@ def main():
     for r in all_native:
         fo=rva_to_fo(r,ss)
         if fo is None: continue
-        ins=list(md.disasm(d[fo:fo+192],base+r))
+        ins=list(md.disasm(d[fo:fo+256],base+r))
         print(f'FUNCTION RVA=0x{r:X} FILE=0x{fo:X}')
-        for i in ins[:24]:
-            print(f'  +0x{i.address-(base+r):03X}: {i.mnemonic} {i.op_str}')
-        hits=[]
-        for i in ins[:64]:
-            if i.mnemonic in ('cmp','mov','lea','add','sub','test','and','or','call','jmp','je','jne','jg','jge','jl','jle','ja','jae','jb','jbe','ret'):
-                if '0xa' in i.op_str.lower() or '0x64' in i.op_str.lower() or i.mnemonic=='ret': hits.append(f'+0x{i.address-(base+r):03X}: {i.mnemonic} {i.op_str}')
-        for h in hits: print('  HIT '+h)
+        for i in ins[:32]: print(f'  +0x{i.address-(base+r):03X}: {i.mnemonic} {i.op_str}')
+        for i in ins[:96]:
+            if '0xa' in i.op_str.lower() or '0x64' in i.op_str.lower(): print(f'  HIT +0x{i.address-(base+r):03X}: {i.mnemonic} {i.op_str}')
     print('FOCUSED_CURRENT_WORKSUITABILITY:')
-    focus=[0x2BB12C0,0x2BB6850,0x2B75390,0x2B740A0,0x28DE8E0,0x295CF70,0x295D190,
-           0x295D1C0,0x29621E0,0x2962250,0x2962290]
-    seen_focus=set()
-    for r in focus:
-        if r in seen_focus: continue
-        seen_focus.add(r); disasm_function(d,ss,base,r)
+    focus=[0x2BB12C0,0x2BB6850,0x2B75390,0x2B740A0,0x28DE8E0,0x295CF70,0x295D190,0x295D1C0,0x29621E0,0x2962250,0x2962290]
+    for r in focus: disasm_function(d,ss,base,r)
+    print('SPEED_TARGETS:')
+    speed_focus=[r for r in all_native if r in candidates.get('GetCraftSpeedByWorkSuitability',[]) or r in candidates.get('GetCraftSpeed_WorkSuitability',[])]
+    for r in sorted(set(speed_focus)): disasm_function(d,ss,base,r,4096)
     print('END_NATIVE_ANALYSIS')
 
 if __name__=='__main__': main()
