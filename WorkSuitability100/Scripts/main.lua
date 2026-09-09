@@ -4,11 +4,11 @@ local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = root .. "/Native/WorkSuitability100.dll"
 dll = dll:gsub("\\\\", "/")
 
-local VERSION = "v3.4"
+local VERSION = "v3.5"
 local TARGET_RANK = 100
 local SPEED_HOOK = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability"
--- Rank 30 = 100x. Linear scaling from rank 10 (1x):
--- factor = 1 + (rank - 10) * 4.95
+-- Every rank gets its own speed value. Rank 10 = 1x and rank 30 = 100x.
+-- Linear progression: each rank above 10 adds 4.95x.
 local SPEED_PER_RANK = 4.95
 
 print("[WorkSuitability100 " .. VERSION .. "] Loading native DLL: " .. dll)
@@ -56,6 +56,8 @@ local function set_rank_cap(game_settings)
 end
 
 local function scaled_speed(speed10, rank)
+    -- Calculate a unique value for EVERY rank from 11 through 100.
+    -- Examples: 11=5.95x, 12=10.9x, 20=50.5x, 30=100x, 47=184.15x, 100=446.5x.
     local factor = 1.0 + ((rank - 10) * SPEED_PER_RANK)
     return math.max(1, math.floor((speed10 * factor) + 0.5)), factor
 end
@@ -98,6 +100,7 @@ local function extend_speed_table()
                 return false
             end
 
+            -- Explicitly populate EVERY rank, not just selected milestones.
             local wrote = 0
             for rank = 11, TARGET_RANK do
                 local result = scaled_speed(speed10, rank)
@@ -114,7 +117,7 @@ local function extend_speed_table()
             end
 
             changed_rows = changed_rows + 1
-            print("[WorkSuitability100 " .. VERSION .. "] SPEED TABLE EXTENDED: rank10=" .. tostring(speed10) .. " entries=" .. tostring(wrote) .. " rank30=" .. tostring(row.CraftSpeeds[30]) .. " rank100=" .. tostring(row.CraftSpeeds[100]))
+            print("[WorkSuitability100 " .. VERSION .. "] SPEED TABLE EXTENDED: rank10=" .. tostring(speed10) .. " entries=" .. tostring(wrote) .. " rank11=" .. tostring(row.CraftSpeeds[11]) .. " rank20=" .. tostring(row.CraftSpeeds[20]) .. " rank30=" .. tostring(row.CraftSpeeds[30]) .. " rank47=" .. tostring(row.CraftSpeeds[47]) .. " rank100=" .. tostring(row.CraftSpeeds[100]))
             return false
         end)
 
@@ -128,7 +131,7 @@ local function extend_speed_table()
 
     if tonumber(changed) and tonumber(changed) > 0 then
         speed_table_extended = true
-        print("[WorkSuitability100 " .. VERSION .. "] Work suitability CraftSpeeds extended through rank " .. TARGET_RANK .. ".")
+        print("[WorkSuitability100 " .. VERSION .. "] Every work suitability rank 11-100 now has a distinct CraftSpeed value.")
         return true
     end
 
@@ -156,13 +159,6 @@ local function get_speed10(work_suitability)
         return value:get()
     end)
     if not row_ok or row == nil or row.CraftSpeeds == nil then
-        return nil
-    end
-
-    local count_ok, count = pcall(function()
-        return row.CraftSpeeds:GetArrayNum()
-    end)
-    if not count_ok or tonumber(count) == nil or tonumber(count) < 11 then
         return nil
     end
 
@@ -213,7 +209,7 @@ local function install_speed_hook()
                     end
 
                     local result, factor = scaled_speed(speed10, rank)
-                    print("[WorkSuitability100 " .. VERSION .. "] SPEED OVERRIDE: ws=" .. tostring(ws) .. " rank=" .. tostring(rank) .. " vanilla10=" .. tostring(speed10) .. " factor=" .. string.format("%.2f", factor) .. " result=" .. tostring(result))
+                    print("[WorkSuitability100 " .. VERSION .. "] SPEED OVERRIDE: ws=" .. tostring(ws) .. " rank=" .. tostring(rank) .. " factor=" .. string.format("%.2f", factor) .. " result=" .. tostring(result))
                     return result
                 end)
 
@@ -240,7 +236,7 @@ local function install_speed_hook()
 
     speed_hook_registered = true
     print("[WorkSuitability100 " .. VERSION .. "] Speed hook registered: " .. SPEED_HOOK)
-    print("[WorkSuitability100 " .. VERSION .. "] Speed scaling: rank 10 = 1x, rank 20 = 50.5x, rank 30 = 100x, rank 47 = 184.15x, rank 100 = 446.5x")
+    print("[WorkSuitability100 " .. VERSION .. "] EVERY-RANK scaling: 10=1x, 11=5.95x, 12=10.9x, 20=50.5x, 30=100x, 47=184.15x, 100=446.5x")
     return true
 end
 
