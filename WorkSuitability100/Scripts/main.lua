@@ -4,7 +4,7 @@ local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = root .. "/Native/WorkSuitability100.dll"
 dll = dll:gsub("\\\\", "/")
 
-local VERSION = "v3.1"
+local VERSION = "v3.2"
 local TARGET_RANK = 100
 local SPEED_HOOK = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability"
 
@@ -28,6 +28,7 @@ end
 print("[WorkSuitability100 " .. VERSION .. "] Native loader initialized.")
 
 local settings = nil
+local speed_hook_registered = false
 
 local function set_rank_cap(game_settings)
     local ok_set, err = pcall(function()
@@ -90,8 +91,6 @@ local function get_speed10(work_suitability)
     return speed10
 end
 
-local speed_hook_registered = false
-
 local function install_speed_hook()
     if speed_hook_registered then
         return true
@@ -106,20 +105,38 @@ local function install_speed_hook()
         local pre, post = RegisterHook(
             SPEED_HOOK,
             function(Context, WorkSuitability)
-                -- Keep the original native function untouched.
+                -- Required native pre-hook. Leave the original function untouched.
             end,
-            function(Context, WorkSuitability)
+            function(Context, WorkSuitability, ReturnValue)
+                print("[WorkSuitability100 " .. VERSION .. "] SPEED HOOK FIRED: wsParam=" .. tostring(WorkSuitability) .. " returnParam=" .. tostring(ReturnValue))
+
                 local ok_calc, scaled = pcall(function()
                     if not Context or not WorkSuitability then
+                        print("[WorkSuitability100 " .. VERSION .. "] SPEED HOOK: missing Context or WorkSuitability")
                         return nil
                     end
 
                     local ws = WorkSuitability:get()
+                    local native_speed = nil
+                    if ReturnValue then
+                        local rv_ok, rv = pcall(function()
+                            return tonumber(ReturnValue:get())
+                        end)
+                        if rv_ok then
+                            native_speed = rv
+                        end
+                    end
+
+                    print("[WorkSuitability100 " .. VERSION .. "] SPEED HOOK ARGS: ws=" .. tostring(ws) .. " native=" .. tostring(native_speed))
+
                     if type(ws) ~= "number" then
+                        print("[WorkSuitability100 " .. VERSION .. "] SPEED HOOK: WorkSuitability:get() was not numeric")
                         return nil
                     end
 
                     local rank = tonumber(Context:GetWorkSuitabilityRank(ws))
+                    print("[WorkSuitability100 " .. VERSION .. "] SPEED HOOK RANK: ws=" .. tostring(ws) .. " rank=" .. tostring(rank))
+
                     if not rank or rank <= 10 or rank > TARGET_RANK then
                         return nil
                     end
@@ -130,15 +147,13 @@ local function install_speed_hook()
                         return nil
                     end
 
-                    -- Rank 30 = 20x. Rank 10 = 1x.
-                    -- Linear growth factor = 1 + (rank - 10) * 0.95.
                     local factor = 1.0 + ((rank - 10) * 0.95)
                     local result = math.floor((speed10 * factor) + 0.5)
                     if result < 1 then
                         result = 1
                     end
 
-                    print("[WorkSuitability100 " .. VERSION .. "] SPEED override: ws=" .. tostring(ws) .. " rank=" .. tostring(rank) .. " vanilla10=" .. tostring(speed10) .. " factor=" .. string.format("%.2f", factor) .. " result=" .. tostring(result))
+                    print("[WorkSuitability100 " .. VERSION .. "] SPEED OVERRIDE: ws=" .. tostring(ws) .. " rank=" .. tostring(rank) .. " vanilla10=" .. tostring(speed10) .. " factor=" .. string.format("%.2f", factor) .. " result=" .. tostring(result))
                     return result
                 end)
 
