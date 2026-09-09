@@ -1,9 +1,9 @@
--- WorkSuitability100 v1.6
--- Current Palworld compatibility loader.
--- The native DLL handles the current rank-100 compatibility check and
--- retains the legacy byte-patch fallback for older supported binaries.
+-- WorkSuitability100 v1.7
+-- Current Palworld runtime patch loader.
+-- The native DLL resolves current UE reflection metadata and patches the
+-- rank-10 checks used by work-suitability rank-up handling.
 
-local MOD = "[WorkSuitability100 v1.6]"
+local MOD = "[WorkSuitability100 v1.7]"
 
 local function get_mod_root()
     local source = debug.getinfo(1, "S").source or ""
@@ -32,5 +32,5 @@ if not ok then
     return
 end
 
-print(MOD .. " Native compatibility initializer loaded.\n")
-print(MOD .. " Check WorkSuitability100\\work_suitability_100.log for the detected mode.\n")
+print(MOD .. " Native rank patcher loaded.\n")
+print(MOD .. " Check WorkSuitability100\\work_suitability_100.log for selected native RVAs.\n")
