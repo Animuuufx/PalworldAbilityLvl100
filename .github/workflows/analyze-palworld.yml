@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/tools/analyze_palworld.py'
+      - '.github/tools/analyze_native_lookup.py'
       - '.github/workflows/analyze-palworld.yml'
       - 'PalworldEXE/Palworld-Win64-Shipping.exe'
   workflow_dispatch:
@@ -35,7 +36,11 @@ jobs:
 
       - name: Analyze signatures and xrefs
         shell: pwsh
-        run: python .github/tools/analyze_palworld.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object analysis.txt
+        run: |
+          python .github/tools/analyze_palworld.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object analysis.txt
+          python .github/tools/analyze_native_lookup.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object native_lookup.txt
+          Add-Content analysis.txt "`r`n"
+          Get-Content native_lookup.txt | Add-Content analysis.txt
 
       - name: Save analysis to repository
         shell: pwsh
