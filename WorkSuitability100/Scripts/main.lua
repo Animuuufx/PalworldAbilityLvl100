@@ -4,7 +4,7 @@ local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = root .. "/Native/WorkSuitability100.dll"
 dll = dll:gsub("\\\\", "/")
 
-local VERSION = "v2.9"
+local VERSION = "v3.0"
 local TARGET_RANK = 100
 local SPEED_HOOK = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability"
 
@@ -61,66 +61,19 @@ local function install_speed_hook()
         return false
     end
 
-    local map_ok, work_map = pcall(function()
-        return settings.WorkSuitabilityDefineDataMap
-    end)
-    if not map_ok or work_map == nil then
-        print("[WorkSuitability100 " .. VERSION .. "] ERROR: WorkSuitabilityDefineDataMap unavailable for speed hook: " .. tostring(work_map))
-        return false
-    end
-
-    local function get_speed10(work_suitability)
-        local find_ok, value = pcall(function()
-            return work_map:Find(work_suitability)
-        end)
-        if not find_ok or value == nil then
-            return nil
-        end
-
-        local row_ok, row = pcall(function()
-            return value:get()
-        end)
-        if not row_ok or row == nil then
-            return nil
-        end
-
-        local speeds = row.CraftSpeeds
-        if speeds == nil then
-            return nil
-        end
-
-        local count_ok, count = pcall(function()
-            return speeds:GetArrayNum()
-        end)
-        if not count_ok or tonumber(count) == nil or tonumber(count) < 11 then
-            return nil
-        end
-
-        local speed_ok, speed10 = pcall(function()
-            return tonumber(speeds[10])
-        end)
-        if not speed_ok or not speed10 or speed10 <= 0 then
-            return nil
-        end
-
-        return speed10
-    end
-
-    local pre_id, post_id
-    local register_ok, register_err = pcall(function()
-        pre_id, post_id = RegisterHook(
+    local register_ok, pre_id, post_id = pcall(function()
+        local pre, post = RegisterHook(
             SPEED_HOOK,
-            function()
-                -- The original native function is allowed to execute unchanged.
-                -- The post-hook below replaces only its returned speed when rank > 10.
+            function(Context, WorkSuitability)
+                -- Intentionally empty. The native function must execute normally.
             end,
-            function(Context, WorkSuitability, ReturnValue)
+            function(Context, WorkSuitability)
                 local rank_ok, rank = pcall(function()
                     local value = WorkSuitability and WorkSuitability:get()
-                    if type(value) == "number" then
-                        return tonumber(Context:GetWorkSuitabilityRank(value))
+                    if type(value) ~= "number" then
+                        return nil
                     end
-                    return nil
+                    return tonumber(Context:GetWorkSuitabilityRank(value))
                 end)
 
                 rank = rank_ok and rank or nil
@@ -128,34 +81,62 @@ local function install_speed_hook()
                     return nil
                 end
 
-                local ws_ok, ws = pcall(function()
-                    return WorkSuitability and WorkSuitability:get()
+                -- Rank 30 = 20x, with rank 10 = 1x.
+                -- Linear growth: factor = 1 + (rank - 10) * 0.95
+                local factor = 1.0 + ((rank - 10) * 0.95)
+                local original_ok, original = pcall(function()
+                    return ReturnValue
                 end)
-                if not ws_ok or type(ws) ~= "number" then
-                    return nil
+                original = original_ok and tonumber(original) or nil
+
+                -- Get the vanilla rank-10 speed from the settings table when available.
+                -- This is deliberately kept independent of TArray growth.
+                local speed10 = nil
+                local find_ok, value = pcall(function()
+                    local work_map = settings.WorkSuitabilityDefineDataMap
+                    if not work_map then
+                        return nil
+                    end
+                    return work_map:Find(WorkSuitability:get())
+                end)
+                if find_ok and value ~= nil then
+                    local row_ok, row = pcall(function() return value:get() end)
+                    if row_ok and row ~= nil and row.CraftSpeeds ~= nil then
+                        local count_ok, count = pcall(function() return row.CraftSpeeds:GetArrayNum() end)
+                        if count_ok and tonumber(count) and tonumber(count) >= 11 then
+                            local speed_ok, candidate = pcall(function() return tonumber(row.CraftSpeeds[10]) end)
+                            if speed_ok and candidate and candidate > 0 then
+                                speed10 = candidate
+                            end
+                        end
+                    end
                 end
 
-                local speed10 = get_speed10(ws)
+                -- If the table lookup is unavailable, use the native return as the baseline.
+                -- At rank 10 vanilla returns the rank-10 speed, so this still scales correctly.
                 if not speed10 then
-                    print("[WorkSuitability100 " .. VERSION .. "] WARNING: no rank-10 CraftSpeed found for WorkSuitability=" .. tostring(ws))
+                    speed10 = original
+                end
+
+                if not speed10 or speed10 <= 0 then
+                    print("[WorkSuitability100 " .. VERSION .. "] WARNING: unable to determine speed baseline for WorkSuitability=" .. tostring(WorkSuitability:get()) .. " rank=" .. tostring(rank))
                     return nil
                 end
 
-                -- Keep rank 10 at 1x. Rank 30 is exactly 20x.
-                -- Ranks above 30 continue linearly at the same rate.
-                local multiplier = 1 + ((rank - 10) * 19 / 20)
-                local scaled = math.floor((speed10 * multiplier) + 0.5)
+                local scaled = math.floor((speed10 * factor) + 0.5)
                 if scaled < 1 then
                     scaled = 1
                 end
 
+                print("[WorkSuitability100 " .. VERSION .. "] SPEED override: WorkSuitability=" .. tostring(WorkSuitability:get()) .. " rank=" .. tostring(rank) .. " baseline=" .. tostring(speed10) .. " factor=" .. string.format("%.2f", factor) .. " result=" .. tostring(scaled))
                 return scaled
             end
         )
+        return true, pre, post
     end)
 
     if not register_ok then
-        print("[WorkSuitability100 " .. VERSION .. "] ERROR: failed to register speed hook: " .. tostring(register_err))
+        print("[WorkSuitability100 " .. VERSION .. "] ERROR: failed to register speed hook: " .. tostring(pre_id))
         return false
     end
 
@@ -166,7 +147,7 @@ local function install_speed_hook()
 
     speed_hook_registered = true
     print("[WorkSuitability100 " .. VERSION .. "] Speed hook registered: " .. SPEED_HOOK)
-    print("[WorkSuitability100 " .. VERSION .. "] Speed scaling: rank 10 = 1x, rank 30 = 20x, linear growth through rank " .. TARGET_RANK)
+    print("[WorkSuitability100 " .. VERSION .. "] Speed scaling: rank 10 = 1x, rank 30 = 20x, rank 100 = 86.5x")
     return true
 end
 
