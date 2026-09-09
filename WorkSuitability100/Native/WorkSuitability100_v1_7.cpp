@@ -3,9 +3,10 @@ extern "C" unsigned long long __readgsqword(unsigned long);
 
 // WorkSuitability100 v1.7
 // Current-build runtime patcher.
-// Resolves the native WorkSuitabilityMaxRank and
-// CanUseTargetWorkSuitabilityRankUp entries from UE reflection metadata,
-// then patches only the selected functions' level-10 immediates to 100.
+// Unreal reflection metadata resolves generated lazy native thunks. Those
+// thunks are not the implementation containing the rank checks, so this
+// version first resolves the cached native function pointer returned by the
+// thunk and patches the actual implementation.
 
 using u8 = unsigned char;
 using u16 = unsigned short;
@@ -25,6 +26,7 @@ using FlushInstructionCache_t = BOOL (__stdcall*)(HANDLE, const void*, usize);
 using CreateFileW_t = HANDLE (__stdcall*)(const wchar_t*, u32, u32, void*, u32, u32, HANDLE);
 using WriteFile_t = BOOL (__stdcall*)(HANDLE, const void*, u32, u32*, void*);
 using CloseHandle_t = BOOL (__stdcall*)(HANDLE);
+using NativeThunk_t = u8* (*)();
 
 static VirtualProtect_t pVirtualProtect = nullptr;
 static FlushInstructionCache_t pFlushInstructionCache = nullptr;
@@ -246,6 +248,26 @@ static void log_rva(const char* prefix, u32 rva, u32 count)
     log_line(buf);
 }
 
+static void log_impl(const char* prefix, u8* impl, u8* base)
+{
+    if (!impl || !base) return;
+    u32 rva = (u32)(impl - base);
+    char buf[160];
+    u32 p = 0;
+    while (prefix[p] && p < 90) { buf[p] = prefix[p]; ++p; }
+    const char* label = " implementation RVA=0x";
+    for (u32 i = 0; label[i]; ++i) buf[p++] = label[i];
+    const char* hex = "0123456789ABCDEF";
+    bool started = false;
+    for (int i = 7; i >= 0; --i)
+    {
+        u8 d = (u8)((rva >> (i * 4)) & 0xF);
+        if (d || started || i == 0) { buf[p++] = hex[d]; started = true; }
+    }
+    buf[p] = 0;
+    log_line(buf);
+}
+
 static bool mem_equal(const void* a, const void* b, usize n)
 {
     const u8* x = (const u8*)a;
@@ -386,17 +408,38 @@ static bool patch_byte(u8* address, u8 expected, u8 value)
     return writable_patch(address, &value, 1) && *address == value;
 }
 
-static u32 patch_mov_eax_10(u8* fn, u32 scan)
+static bool is_plausible_impl(u8* impl, u8* base, u32 text_rva, u32 text_size)
 {
-    if (!fn) return 0;
-    for (u32 i = 0; i + 5 <= scan; ++i)
+    if (!impl) return false;
+    u32 rva = (u32)(impl - base);
+    return is_text_rva(rva, text_rva, text_size);
+}
+
+// UE-generated native accessors used by this build are zero-argument lazy
+// thunks: they initialize the cached function pointer, then return it. The
+// implementation is what we actually need to patch.
+static u8* resolve_native_impl(const Candidate* candidate, u8* base, u32 text_rva, u32 text_size)
+{
+    if (!candidate || !candidate->fn) return nullptr;
+    u8* fn = candidate->fn;
+
+    // mov rax,[rip+disp32] / test rax,rax / jne / ... / mov rax,[rip+disp32] / add rsp,28h / ret
+    if (fn[0] == 0x48 && fn[1] == 0x8B && fn[2] == 0x05 &&
+        fn[7] == 0x48 && fn[8] == 0x85 && fn[9] == 0xC0 &&
+        fn[10] == 0x75)
     {
-        if (fn[i] == 0xB8 && fn[i+1] == 0x0A && fn[i+2] == 0x00 && fn[i+3] == 0x00 && fn[i+4] == 0x00)
-        {
-            if (patch_byte(fn + i + 1, 0x0A, 0x64)) return 1;
-        }
+        NativeThunk_t thunk = (NativeThunk_t)fn;
+        u8* impl = nullptr;
+        // Do not dereference arbitrary non-text returns. The thunk itself is
+        // compiler-generated and takes no parameters in the current build.
+        impl = thunk();
+        if (is_plausible_impl(impl, base, text_rva, text_size)) return impl;
     }
-    return 0;
+
+    // Fallback for a future build where reflection points directly at the
+    // implementation rather than a generated lazy accessor.
+    if (is_plausible_impl(fn, base, text_rva, text_size)) return fn;
+    return nullptr;
 }
 
 static bool short_jcc(u8 b)
@@ -426,15 +469,37 @@ static u32 patch_compare_10(u8* fn, u32 scan)
     return patched;
 }
 
-static u32 patch_named_function(u8* base, u32 image, u32 text_rva, u32 text_size, const char* name, bool compare_mode)
+static u32 patch_mov_eax_10(u8* fn, u32 scan)
+{
+    if (!fn) return 0;
+    for (u32 i = 0; i + 5 <= scan; ++i)
+    {
+        if (fn[i] == 0xB8 && fn[i+1] == 0x0A && fn[i+2] == 0x00 && fn[i+3] == 0x00 && fn[i+4] == 0x00)
+        {
+            if (patch_byte(fn + i + 1, 0x0A, 0x64)) return 1;
+        }
+    }
+    return 0;
+}
+
+static u32 resolve_and_patch_name(u8* base, u32 image, u32 text_rva, u32 text_size, const char* name, bool compare_mode)
 {
     Candidate candidates[128] = {};
     u32 count = collect_candidates(base, image, text_rva, text_size, name, candidates, 128);
     Candidate* best = best_candidate(candidates, count);
     if (!best) return 0;
+
     log_rva(name, best->rva, best->count);
-    if (compare_mode) return patch_compare_10(best->fn, 512);
-    return patch_mov_eax_10(best->fn, 192);
+    u8* impl = resolve_native_impl(best, base, text_rva, text_size);
+    if (!impl)
+    {
+        log_line("[WorkSuitability100 v1.7] ERROR: native thunk did not resolve to a text implementation.");
+        return 0;
+    }
+
+    log_impl(name, impl, base);
+    if (compare_mode) return patch_compare_10(impl, 2048);
+    return patch_mov_eax_10(impl, 512) + patch_compare_10(impl, 2048);
 }
 
 static u32 patch_related_rank_checks(u8* base, u32 image, u32 text_rva, u32 text_size)
@@ -446,14 +511,7 @@ static u32 patch_related_rank_checks(u8* base, u32 image, u32 text_rva, u32 text
     };
     u32 total = 0;
     for (u32 i = 0; i < 3; ++i)
-    {
-        Candidate candidates[128] = {};
-        u32 count = collect_candidates(base, image, text_rva, text_size, names[i], candidates, 128);
-        Candidate* best = best_candidate(candidates, count);
-        if (!best) continue;
-        log_rva(names[i], best->rva, best->count);
-        total += patch_compare_10(best->fn, 512);
-    }
+        total += resolve_and_patch_name(base, image, text_rva, text_size, names[i], true);
     return total;
 }
 
@@ -467,22 +525,19 @@ static bool apply_current(u8* base, u32 image)
     }
     if (parsed_image < image) image = parsed_image;
 
-    // The current analysis shows these metadata names are present and have
-    // multiple native entries. Select the most frequently referenced entry.
-    u32 max_patch = patch_named_function(base, image, text_rva, text_size, "WorkSuitabilityMaxRank", false);
-    u32 use_patch = patch_named_function(base, image, text_rva, text_size, "CanUseTargetWorkSuitabilityRankUp", true);
-    u32 related = 0;
-    if (max_patch == 0 && use_patch == 0)
-        related = patch_related_rank_checks(base, image, text_rva, text_size);
+    // Resolve and patch the actual implementation behind Unreal's lazy thunks.
+    u32 max_patch = resolve_and_patch_name(base, image, text_rva, text_size, "WorkSuitabilityMaxRank", false);
+    u32 use_patch = resolve_and_patch_name(base, image, text_rva, text_size, "CanUseTargetWorkSuitabilityRankUp", true);
+    u32 related = patch_related_rank_checks(base, image, text_rva, text_size);
 
     u32 total = max_patch + use_patch + related;
     if (total)
     {
-        log_line("[WorkSuitability100 v1.7] PATCHED: current rank ceiling checks now accept 100.");
+        log_line("[WorkSuitability100 v1.7] PATCHED: current native implementations now accept rank 100.");
         return true;
     }
 
-    log_line("[WorkSuitability100 v1.7] ERROR: located current native functions but found no patchable level-10 checks.");
+    log_line("[WorkSuitability100 v1.7] ERROR: native implementations were resolved but no patchable level-10 checks were found.");
     return false;
 }
 
