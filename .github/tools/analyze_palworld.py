@@ -38,6 +38,7 @@ def main():
         for sn,va,rs,rp,vs,ch in exe:
             for off in findall(d[rp:rp+rs],p): hs.append(va+off)
         print(f'  {n}: '+(', '.join(f'0x{x:X}' for x in hs[:64]) or 'NOT_FOUND'))
+
     md=Cs(CS_ARCH_X86,CS_MODE_64); md.detail=True
     targets=[b'GetCraftSpeedByWorkSuitability',b'CanUseTargetWorkSuitabilityRankUp']
     target_rvas=[]
@@ -45,7 +46,7 @@ def main():
     for t in targets:
         hs=list(findall(d,t))
         print(f'  {t.decode()}: '+(', '.join(f'FILE=0x{x:X} RVA=0x{fo_to_rva(x,secs):X}' for x in hs[:32]) if hs else 'NOT_FOUND'))
-        for x in hs: 
+        for x in hs:
             r=fo_to_rva(x,secs)
             if r is not None: target_rvas.append(r)
         wt=t.decode().encode('utf-16le'); hs2=list(findall(d,wt))
@@ -54,6 +55,20 @@ def main():
             r=fo_to_rva(x,secs)
             if r is not None: target_rvas.append(r)
     target_rvas=set(target_rvas)
+
+    print('WORK_SUITABILITY_STRINGS:')
+    seen_strings=set()
+    for needle in (b'WorkSuitability', b'Work Suitability', b'CraftSpeed'):
+        for x in findall(d,needle):
+            if x in seen_strings: continue
+            seen_strings.add(x)
+            r=fo_to_rva(x,secs)
+            if r is not None:
+                lo=max(0,x-96); hi=min(len(d),x+192)
+                parts=d[lo:hi].split(b'\0')
+                printable=[q.decode('ascii','replace') for q in parts if len(q)>=8 and all(32<=c<127 for c in q)]
+                print(f'  FILE=0x{x:X} RVA=0x{r:X} NEEDLE={needle.decode()}: ' + ' | '.join(printable[:8]))
+
     print('TARGET_STRING_XREFS:')
     refs=[]
     for sn,va,rs,rp,vs,ch in exe:
@@ -63,6 +78,14 @@ def main():
                     target=ins.address+ins.size+operand.mem.disp-base
                     if target in target_rvas:
                         refs.append((ins.address-base,target)); print(f'  RVA=0x{ins.address-base:X} {ins.mnemonic} {ins.op_str} -> RVA=0x{target:X}')
+
+    print('TARGET_POINTER_XREFS:')
+    for tr in sorted(target_rvas):
+        p=struct.pack('<Q',base+tr); hits=[]
+        for sn,va,rs,rp,vs,ch in exe:
+            for off in findall(d[rp:rp+rs],p): hits.append(va+off)
+        print(f'  TARGET_RVA=0x{tr:X}: '+(', '.join(f'0x{x:X}' for x in hits[:64]) or 'NOT_FOUND'))
+
     print('XREF_NEIGHBORHOODS:')
     seen=set()
     for rva,_ in refs:
@@ -72,6 +95,7 @@ def main():
         for sn,va,rs,rp,vs,ch in exe:
             if va<=start<va+rs:
                 off=rp+(start-va); print(f'  START_RVA=0x{start:X} {sn}: {hx(d[off:off+384])}'); break
+
     print('RANK_10_PATTERNS:')
     pats=[bytes.fromhex(x) for x in ['83 F8 0A','83 F9 0A','83 FA 0A','83 FB 0A','83 FF 0A','41 83 F8 0A','41 83 F9 0A','41 83 FA 0A','B8 0A 00 00 00','B9 0A 00 00 00','BA 0A 00 00 00','BF 0A 00 00 00']]
     for p in pats:
@@ -79,4 +103,5 @@ def main():
         for sn,va,rs,rp,vs,ch in exe:
             for off in findall(d[rp:rp+rs],p): hs.append((va+off,sn))
         print(f'  {hx(p)}: '+(', '.join(f'0x{x:X}({s})' for x,s in hs[:160]) or 'NOT_FOUND'))
+
 if __name__=='__main__': main()
