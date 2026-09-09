@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - 'WorkSuitability100/Native/WorkSuitability100_v1_7.cpp'
-      - 'WorkSuitability100/Native/patch_v1_7_source.ps1'
       - '.github/workflows/build-work-suitability.yml'
   workflow_dispatch:
 
@@ -26,12 +25,6 @@ jobs:
         with:
           arch: x64
 
-      - name: Apply source patch
-        shell: pwsh
-        run: |
-          & .\WorkSuitability100\Native\patch_v1_7_source.ps1
-          git diff -- WorkSuitability100/Native/WorkSuitability100_v1_7.cpp
-
       - name: Build DLL
         shell: cmd
         run: |
@@ -44,19 +37,18 @@ jobs:
         run: |
           git fetch origin main
           git reset --hard origin/main
-          & .\WorkSuitability100\Native\patch_v1_7_source.ps1
           Copy-Item build/WorkSuitability100.dll WorkSuitability100/Native/WorkSuitability100.dll -Force
           $sha = (Get-FileHash WorkSuitability100/Native/WorkSuitability100.dll -Algorithm SHA256).Hash.ToLower()
           "WorkSuitability100.dll SHA256: $sha" | Set-Content WorkSuitability100/Native/BUILD_INFO.txt
           Get-Item WorkSuitability100/Native/WorkSuitability100.dll | Select-Object FullName,Length
-          git add WorkSuitability100/Native/WorkSuitability100.dll WorkSuitability100/Native/BUILD_INFO.txt WorkSuitability100/Native/WorkSuitability100_v1_7.cpp
+          git add WorkSuitability100/Native/WorkSuitability100.dll WorkSuitability100/Native/BUILD_INFO.txt
           git diff --cached --stat
 
-      - name: Commit rebuilt DLL and patched source
+      - name: Commit rebuilt DLL
         shell: pwsh
         run: |
           if (git diff --cached --quiet) { exit 0 }
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Build WorkSuitability100 v1.7 metadata candidate fix [skip ci]'
+          git commit -m 'Build WorkSuitability100 v1.7 [skip ci]'
           git push origin HEAD:main
