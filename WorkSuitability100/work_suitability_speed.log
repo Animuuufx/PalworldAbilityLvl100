@@ -1,6 +1,0 @@
-[WorkSuitability100 v1.3] Native v1.2 rank + handbook patches loaded.
-[WorkSuitability100 v1.3] Hook installed: /Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability
-[WorkSuitability100 v1.3] Hook installed: /Script/Pal.PalIndividualCharacterParameter:GetCraftSpeed_withBuff_WorkSuitability
-[WorkSuitability100 v1.3] Hook installed: /Script/Pal.PalIndividualCharacterParameter:GetCraftSpeed
-[WorkSuitability100 v1.3] Hook installed: /Script/Pal.PalIndividualCharacterParameter:GetCraftSpeed_withBuff
-[WorkSuitability100 v1.3] READY - suitability ranks above 10 now scale actual work speed (0.50 extra multiplier per rank; rank 100 = 46.00x level-10 speed).
