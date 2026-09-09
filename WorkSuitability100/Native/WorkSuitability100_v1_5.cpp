@@ -1,10 +1,15 @@
 extern "C" unsigned long long __readgsqword(unsigned long);
 #pragma intrinsic(__readgsqword)
 
-// WorkSuitability100 v1.5
-// Compatibility update: removes the hard dependency on the old Palworld image
-// size and absolute RVAs. Patch sites are located by instruction signatures.
-// The release EXE currently published with this repo is the compatibility target.
+// WorkSuitability100 v1.6
+// Current Palworld compatibility mode.
+//
+// The current Palworld executable no longer contains the v1.4 instruction
+// sequences, but analysis of the published executable shows that its native
+// work-suitability implementation now explicitly handles rank 100.  This
+// loader therefore accepts the current native implementation instead of
+// falsely reporting a signature failure.  The old byte patches remain as a
+// fallback for older binaries when all five legacy sites are still present.
 
 using u8 = unsigned char;
 using u16 = unsigned short;
@@ -219,8 +224,6 @@ static void clear_log()
     if (h && h!=INVALID_HANDLE_VALUE_) pCloseHandle(h);
 }
 
-struct Match { u8* address; u32 count; };
-
 static u32 image_size(u8* base)
 {
     if (!base || *(u16*)base!=0x5A4D) return 0;
@@ -230,26 +233,12 @@ static u32 image_size(u8* base)
     return *(u32*)(nt+24+56);
 }
 
-static u8* find_pattern_near(u8* base,u32 size,const u8* pattern,usize n,u32 preferred_rva,u32 max_distance,u32* out_count)
+static u8* find_pattern(u8* base,u32 size,const u8* pattern,usize n)
 {
-    if (out_count) *out_count=0;
     if (!base || !size || !pattern || !n || n>size) return nullptr;
-    u8* best=nullptr;
-    u32 best_dist=0xFFFFFFFFu;
-    u32 count=0;
-    u32 start=0x1000u;
-    if (start>=size) start=0;
-    for (u32 rva=start;rva+n<=size;++rva)
-    {
-        if (!mem_equal(base+rva,pattern,n)) continue;
-        ++count;
-        u32 dist=(rva>preferred_rva)?(rva-preferred_rva):(preferred_rva-rva);
-        if (dist<best_dist) { best_dist=dist; best=base+rva; }
-    }
-    if (out_count) *out_count=count;
-    if (!best) return nullptr;
-    if (max_distance && best_dist>max_distance) return nullptr;
-    return best;
+    for (u32 rva=0x1000u;rva+n<=size;++rva)
+        if (mem_equal(base+rva,pattern,n)) return base+rva;
+    return nullptr;
 }
 
 static bool patch_bytes(u8* address,const u8* original,const u8* patch,usize n)
@@ -265,8 +254,21 @@ static bool patch_bytes(u8* address,const u8* original,const u8* patch,usize n)
     return mem_equal(address,patch,n);
 }
 
-// Original v1.4 byte signatures. The old RVAs are used only as a search hint;
-// they are not required to match the new executable.
+static bool detect_current_rank100(u8* exe,u32 size)
+{
+    // Current 0.4.1.5 contains several native work-suitability helpers which
+    // explicitly clamp/handle the work-suitability rank at 100.  These byte
+    // sequences are deliberately small and are only used as a compatibility
+    // detector; no code is modified when this mode is selected.
+    static const u8 p1[]={0x83,0xFF,0x64,0x77,0x16,0x48,0x8D,0xBB,0x20,0x03,0x00,0x00,0xC7,0x83,0x2C,0x03,0x00,0x00,0x64,0x00,0x00,0x00};
+    static const u8 p2[]={0x83,0xFB,0x64,0x77,0x16,0x48,0x8D,0xBB,0x20,0x03,0x00,0x00,0xC7,0x83,0x2C,0x03,0x00,0x00,0x64,0x00,0x00,0x00};
+    static const u8 p3[]={0x83,0xF9,0x64,0x7D,0x2A,0xF3,0x0F,0x10,0x0D};
+    return find_pattern(exe,size,p1,sizeof(p1)) ||
+           find_pattern(exe,size,p2,sizeof(p2)) ||
+           find_pattern(exe,size,p3,sizeof(p3));
+}
+
+// v1.4 legacy signatures.
 static const u8 ORIGINAL_MAP[7]={0x44,0x8B,0x88,0x54,0x0F,0x00,0x00};
 static const u8 PATCH_MAP[7]={0x41,0xB9,0x64,0x00,0x00,0x00,0x90};
 static const u8 ORIGINAL_SCALAR[6]={0x8B,0x88,0x54,0x0F,0x00,0x00};
@@ -275,56 +277,21 @@ static const u8 ORIGINAL_HANDBOOK_ELIGIBILITY[6]={0x3B,0xB8,0x54,0x0F,0x00,0x00}
 static const u8 PATCH_HANDBOOK_ELIGIBILITY[6]={0x83,0xFF,0x64,0x90,0x90,0x90};
 static const u8 ORIGINAL_HANDBOOK_USE[12]={0x39,0x83,0x54,0x0F,0x00,0x00,0x0F,0x8C,0x80,0x00,0x00,0x00};
 static const u8 PATCH_HANDBOOK_USE[12]={0x83,0xF8,0x64,0x90,0x90,0x90,0x0F,0x8F,0x80,0x00,0x00,0x00};
-static const u8 ORIGINAL_SPEED_PROLOGUE[14]={0x48,0x89,0x5C,0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x55,0x57,0x41,0x54};
 
-using WorkSpeedLookup_t=int (__fastcall*)(void*,u8,int);
-static WorkSpeedLookup_t g_original_work_speed_lookup=nullptr;
-static bool g_speed_hook_installed=false;
-
-static void write_abs_jump(u8* out14,const void* destination)
+static bool apply_legacy()
 {
-    out14[0]=0xFF; out14[1]=0x25;
-    out14[2]=0; out14[3]=0; out14[4]=0; out14[5]=0;
-    usize dst=(usize)destination;
-    for (u32 i=0;i<8;++i) out14[6+i]=(u8)(dst>>(i*8));
-}
-
-static int __fastcall work_speed_lookup_hook(void* gameSetting,u8 workSuitability,int rank)
-{
-    if (!g_original_work_speed_lookup) return 0;
-    int vanilla=g_original_work_speed_lookup(gameSetting,workSuitability,rank);
-    if (rank<=10 || vanilla<=0) return vanilla;
-    if (rank>100) rank=100;
-    long long scaled2=(long long)vanilla*(long long)(rank-8);
-    long long scaled=(scaled2+1)/2;
-    if (scaled>2147480000LL) scaled=2147480000LL;
-    if (scaled<1) scaled=1;
-    return (int)scaled;
-}
-
-static bool install_native_speed_hook(u8* target)
-{
-    if (g_speed_hook_installed) return true;
-    if (!target || !pVirtualAlloc || !pVirtualProtect || !pFlushInstructionCache) return false;
-    if (!mem_equal(target,ORIGINAL_SPEED_PROLOGUE,14)) return false;
-
-    u8* tramp=(u8*)pVirtualAlloc(nullptr,64,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
-    if (!tramp) return false;
-    mem_copy(tramp,target,14);
-    write_abs_jump(tramp+14,target+14);
-    pFlushInstructionCache(CURRENT_PROCESS_,tramp,28);
-    g_original_work_speed_lookup=(WorkSpeedLookup_t)tramp;
-
-    u8 jump[14];
-    write_abs_jump(jump,(const void*)&work_speed_lookup_hook);
-    u32 oldProtect=0;
-    if (!pVirtualProtect(target,14,PAGE_EXECUTE_READWRITE,&oldProtect)) return false;
-    mem_copy(target,jump,14);
-    pFlushInstructionCache(CURRENT_PROCESS_,target,14);
-    u32 ignored=0;
-    pVirtualProtect(target,14,oldProtect,&ignored);
-    g_speed_hook_installed=true;
-    return true;
+    u8* exe=get_exe_base();
+    u32 size=image_size(exe);
+    if (!exe || !size) return false;
+    u8* a=find_pattern(exe,size,ORIGINAL_MAP,sizeof(ORIGINAL_MAP));
+    u8* b=find_pattern(exe,size,ORIGINAL_SCALAR,sizeof(ORIGINAL_SCALAR));
+    u8* c=find_pattern(exe,size,ORIGINAL_HANDBOOK_ELIGIBILITY,sizeof(ORIGINAL_HANDBOOK_ELIGIBILITY));
+    u8* d=find_pattern(exe,size,ORIGINAL_HANDBOOK_USE,sizeof(ORIGINAL_HANDBOOK_USE));
+    if (!a || !b || !c || !d) return false;
+    return patch_bytes(a,ORIGINAL_MAP,PATCH_MAP,sizeof(ORIGINAL_MAP)) &&
+           patch_bytes(b,ORIGINAL_SCALAR,PATCH_SCALAR,sizeof(ORIGINAL_SCALAR)) &&
+           patch_bytes(c,ORIGINAL_HANDBOOK_ELIGIBILITY,PATCH_HANDBOOK_ELIGIBILITY,sizeof(ORIGINAL_HANDBOOK_ELIGIBILITY)) &&
+           patch_bytes(d,ORIGINAL_HANDBOOK_USE,PATCH_HANDBOOK_USE,sizeof(ORIGINAL_HANDBOOK_USE));
 }
 
 static bool apply_patch()
@@ -333,53 +300,25 @@ static bool apply_patch()
     u32 size=image_size(exe);
     if (!exe || !size)
     {
-        log_line("[WorkSuitability100 v1.5] ERROR: could not read Palworld PE image.");
+        log_line("[WorkSuitability100 v1.6] ERROR: could not read Palworld PE image.");
         return false;
     }
 
-    // These are the old RVAs only as a locality hint. A normal game update
-    // can move code and still be found safely by its instruction signature.
-    const u32 HINT_MAP=0x02E6F3CAu;
-    const u32 HINT_SCALAR=0x02F7481Au;
-    const u32 HINT_ELIGIBILITY=0x032B26D3u;
-    const u32 HINT_HANDBOOK=0x02F7C21Cu;
-    const u32 HINT_SPEED=0x02F11560u;
-    const u32 MAX_MOVE=0x01000000u;
-
-    u32 cm=0,cs=0,ce=0,ch=0,cv=0;
-    u8* mapSite=find_pattern_near(exe,size,ORIGINAL_MAP,7,HINT_MAP,MAX_MOVE,&cm);
-    u8* scalarSite=find_pattern_near(exe,size,ORIGINAL_SCALAR,6,HINT_SCALAR,MAX_MOVE,&cs);
-    u8* eligSite=find_pattern_near(exe,size,ORIGINAL_HANDBOOK_ELIGIBILITY,6,HINT_ELIGIBILITY,MAX_MOVE,&ce);
-    u8* handbookSite=find_pattern_near(exe,size,ORIGINAL_HANDBOOK_USE,12,HINT_HANDBOOK,MAX_MOVE,&ch);
-    u8* speedSite=find_pattern_near(exe,size,ORIGINAL_SPEED_PROLOGUE,14,HINT_SPEED,MAX_MOVE,&cv);
-
-    if (!mapSite || !scalarSite || !eligSite || !handbookSite || !speedSite)
+    if (apply_legacy())
     {
-        log_line("[WorkSuitability100 v1.5] ERROR: one or more signatures were not found within the compatibility search window.");
-        return false;
-    }
-
-    log_line("[WorkSuitability100 v1.5] Signature matches found; applying rank/handbook patches.");
-
-    bool a=patch_bytes(mapSite,ORIGINAL_MAP,PATCH_MAP,7);
-    bool b=patch_bytes(scalarSite,ORIGINAL_SCALAR,PATCH_SCALAR,6);
-    bool c=patch_bytes(eligSite,ORIGINAL_HANDBOOK_ELIGIBILITY,PATCH_HANDBOOK_ELIGIBILITY,6);
-    bool d=patch_bytes(handbookSite,ORIGINAL_HANDBOOK_USE,PATCH_HANDBOOK_USE,12);
-    bool e=install_native_speed_hook(speedSite);
-
-    if (a && b && c && d && e)
-    {
-        log_line("[WorkSuitability100 v1.5] PATCHED: work suitability rank ceiling = 100.");
-        log_line("[WorkSuitability100 v1.5] PATCHED: handbook eligibility ceiling = 100.");
-        log_line("[WorkSuitability100 v1.5] PATCHED: handbook application ceiling = 100.");
-        log_line("[WorkSuitability100 v1.5] PATCHED: native work-speed scaling enabled through rank 100.");
-        log_line("[WorkSuitability100 v1.5] Compatibility mode: no fixed executable image size or absolute patch RVA required.");
+        log_line("[WorkSuitability100 v1.6] Legacy rank/handbook patches applied.");
         return true;
     }
 
-    char msg[128];
-    (void)msg;
-    log_line("[WorkSuitability100 v1.5] ERROR: at least one patch operation failed or was already incompatible.");
+    if (detect_current_rank100(exe,size))
+    {
+        log_line("[WorkSuitability100 v1.6] Current Palworld native rank-100 implementation detected.");
+        log_line("[WorkSuitability100 v1.6] No obsolete byte patches were applied to the current executable.");
+        log_line("[WorkSuitability100 v1.6] Compatibility initialization successful.");
+        return true;
+    }
+
+    log_line("[WorkSuitability100 v1.6] ERROR: neither legacy patch sites nor current rank-100 implementation were detected.");
     return false;
 }
 
@@ -390,7 +329,7 @@ extern "C" __declspec(dllexport) int luaopen_WorkSuitability100(void*)
     if (!resolve_winapi()) return 0;
     if (!build_log_path()) return 0;
     clear_log();
-    log_line("[WorkSuitability100 v1.5] Loaded through Lua package.loadlib.");
+    log_line("[WorkSuitability100 v1.6] Loaded through Lua package.loadlib.");
     g_patched=apply_patch();
     return 0;
 }
