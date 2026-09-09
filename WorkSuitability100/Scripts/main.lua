@@ -4,7 +4,7 @@ local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = root .. "/Native/WorkSuitability100.dll"
 dll = dll:gsub("\\\\", "/")
 
-local VERSION = "v2.6"
+local VERSION = "v2.7"
 local TARGET_RANK = 100
 
 print("[WorkSuitability100 " .. VERSION .. "] Loading native DLL: " .. dll)
@@ -68,22 +68,33 @@ local function extend_speed_table(row, label)
         return false
     end
 
-    -- UE4SS TArray indexing is zero-based, so rank 10 is element 10.
     local speed10 = tonumber(speeds[math.min(10, count - 1)]) or 0
     if speed10 <= 0 then
         print("[WorkSuitability100 " .. VERSION .. "] WARNING: " .. label .. " has invalid rank-10 speed=" .. tostring(speed10) .. ".")
         return false
     end
 
+    print("[WorkSuitability100 " .. VERSION .. "] " .. label .. " CraftSpeeds entries=" .. count .. ", rank10=" .. tostring(speed10))
+
+    -- UE4SS TArray supports indexed reads/writes, but __newindex cannot grow
+    -- the array beyond Num. Only write existing entries here; growth is handled
+    -- separately below when the array has spare capacity.
     if count >= TARGET_RANK + 1 then
         print("[WorkSuitability100 " .. VERSION .. "] " .. label .. " CraftSpeeds already has " .. count .. " entries.")
         return true
     end
 
-    local changed = 0
+    local max_ok, max_count = pcall(function()
+        return speeds:GetArrayMax()
+    end)
+    max_count = max_ok and (tonumber(max_count) or 0) or 0
+
+    if max_count < TARGET_RANK + 1 then
+        print("[WorkSuitability100 " .. VERSION .. "] WARNING: " .. label .. " CraftSpeeds capacity=" .. max_count .. " cannot be grown through Lua indexing.")
+        return false
+    end
+
     for rank = count, TARGET_RANK do
-        -- Extend the vanilla rank-10 throughput linearly. This makes rank 50
-        -- exactly 5x rank 10 and keeps every intermediate rank useful.
         local speed = math.floor((speed10 * rank / 10) + 0.5)
         local ok_write, write_err = pcall(function()
             speeds[rank] = speed
@@ -92,10 +103,9 @@ local function extend_speed_table(row, label)
             print("[WorkSuitability100 " .. VERSION .. "] ERROR: failed writing " .. label .. " rank " .. rank .. ": " .. tostring(write_err))
             return false
         end
-        changed = changed + 1
     end
 
-    print("[WorkSuitability100 " .. VERSION .. "] " .. label .. " CraftSpeeds " .. count .. "->" .. (TARGET_RANK + 1) .. " entries; rank10=" .. speed10 .. ", added=" .. changed)
+    print("[WorkSuitability100 " .. VERSION .. "] " .. label .. " CraftSpeeds extended to rank " .. TARGET_RANK)
     return true
 end
 
@@ -127,7 +137,7 @@ local function extend_work_suitability_speeds()
     local failed = 0
 
     local foreach_ok, foreach_err = pcall(function()
-        work_map:ForEach(function(_, key, value)
+        work_map:ForEach(function(key, value)
             local row_ok, row_or_err = pcall(function()
                 return value:get()
             end)
@@ -140,7 +150,11 @@ local function extend_work_suitability_speeds()
             local row = row_or_err
             local label = "WorkSuitability"
             local key_ok, key_name = pcall(function()
-                return tostring(key:get())
+                local k = key:get()
+                if k and k.ToString then
+                    return k:ToString()
+                end
+                return tostring(k)
             end)
             if key_ok and key_name and key_name ~= "" then
                 label = key_name
