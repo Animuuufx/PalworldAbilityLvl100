@@ -3,7 +3,7 @@ local script = source:sub(1, 1) == "@" and source:sub(2) or source
 local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = (root .. "/Native/WorkSuitability100.dll"):gsub("\\\\", "/")
 
-local VERSION = "v3.6"
+local VERSION = "v3.7"
 local TARGET_RANK = 100
 local SPEED_PER_RANK = 4.95
 
@@ -38,6 +38,9 @@ local function extend_array(arr, label, field)
     end
 
     local ok_base, base = pcall(function()
+        if field == "DropNumRate" or field == "DamageRate" then
+            return tonumber(arr[10][field])
+        end
         return tonumber(arr[10])
     end)
     if not ok_base or not base or base <= 0 then
@@ -49,13 +52,13 @@ local function extend_array(arr, label, field)
     for rank = 11, TARGET_RANK do
         local value = scaled(base, rank)
         local ok_write, err = pcall(function()
-            if field == "DamageRate" then
+            if field == "DamageRate" or field == "DropNumRate" then
                 local entry = arr[rank]
                 if entry ~= nil then
-                    entry.DamageRate = value
+                    entry[field] = value
                     arr[rank] = entry
                 else
-                    arr[rank] = { DamageRate = value }
+                    arr[rank] = { [field] = value }
                 end
             else
                 arr[rank] = value
@@ -72,14 +75,14 @@ local function extend_array(arr, label, field)
         return tonumber(arr:GetArrayNum())
     end)
     local v47_ok, v47 = pcall(function()
-        if field == "DamageRate" then
-            return tonumber(arr[47].DamageRate)
+        if field == "DamageRate" or field == "DropNumRate" then
+            return tonumber(arr[47][field])
         end
         return tonumber(arr[47])
     end)
     local v100_ok, v100 = pcall(function()
-        if field == "DamageRate" then
-            return tonumber(arr[100].DamageRate)
+        if field == "DamageRate" or field == "DropNumRate" then
+            return tonumber(arr[100][field])
         end
         return tonumber(arr[100])
     end)
@@ -91,8 +94,10 @@ end
 local function patch_work_speed(settings)
     local changed = 0
 
-    -- Generic work speed used by workstations/assigned work, including
-    -- Lumbering work such as Logging Sites. This does NOT touch animation rate.
+    -- Generic work-speed table. This covers the normal work suitabilities:
+    -- Kindling, Watering, Planting, Electricity, Handiwork, Cooling,
+    -- Medicine, Transporting, Farming and other entries represented by
+    -- WorkSuitabilityDefineDataMap. Animation playback rate is untouched.
     local generic_ok = pcall(function()
         local data = settings.WorkSuitabilityDefineDataMap
         if not data then return end
@@ -107,7 +112,35 @@ local function patch_work_speed(settings)
         end)
     end)
     if not generic_ok then
-        print("[WorkSuitability100 " .. VERSION .. "] WARNING: generic work-speed table scan failed.")
+        print("[WorkSuitability " .. VERSION .. "] WARNING: generic work-speed table scan failed.")
+    end
+
+    -- Collection/Gathering has an additional rank table controlling the
+    -- amount obtained from collection work. Scale that independently while
+    -- leaving animation speed alone.
+    local collection_ok, collection_err = pcall(function()
+        local collection = settings.WorkSuitabilityDefineData_Collection
+        if not collection then
+            print("[WorkSuitability100 " .. VERSION .. "] WARNING: WorkSuitabilityDefineData_Collection unavailable.")
+            return
+        end
+
+        if collection.CommonDefineData and collection.CommonDefineData.CraftSpeeds then
+            if extend_array(collection.CommonDefineData.CraftSpeeds, "Collection CraftSpeeds") then
+                changed = changed + 1
+            end
+        end
+
+        if collection.CollectionDefineData then
+            if extend_array(collection.CollectionDefineData, "Collection DropNumRate", "DropNumRate") then
+                changed = changed + 1
+            end
+        else
+            print("[WorkSuitability100 " .. VERSION .. "] WARNING: CollectionDefineData unavailable.")
+        end
+    end)
+    if not collection_ok then
+        print("[WorkSuitability100 " .. VERSION .. "] WARNING: Collection patch failed: " .. tostring(collection_err))
     end
 
     -- Lumbering/Deforest has its own rank data. DamageRate is the actual
@@ -138,6 +171,35 @@ local function patch_work_speed(settings)
         print("[WorkSuitability100 " .. VERSION .. "] WARNING: Lumbering/Deforest patch failed: " .. tostring(deforest_err))
     end
 
+    -- Mining has the same special resource-damage structure as Lumbering.
+    -- Patch both its generic CraftSpeeds and actual mining DamageRate so the
+    -- rank affects ore/resource work rather than only the animation layer.
+    local mining_ok, mining_err = pcall(function()
+        local mining = settings.WorkSuitabilityDefineData_Mining
+        if not mining then
+            print("[WorkSuitability100 " .. VERSION .. "] WARNING: WorkSuitabilityDefineData_Mining unavailable.")
+            return
+        end
+
+        if mining.CommonDefineData and mining.CommonDefineData.CraftSpeeds then
+            if extend_array(mining.CommonDefineData.CraftSpeeds, "Mining CraftSpeeds") then
+                changed = changed + 1
+            end
+        end
+
+        if mining.MiningDefineData then
+            if extend_array(mining.MiningDefineData, "Mining DamageRate", "DamageRate") then
+                changed = changed + 1
+            end
+        else
+            print("[WorkSuitability100 " .. VERSION .. "] WARNING: MiningDefineData unavailable.")
+        end
+    end)
+    if not mining_ok then
+        print("[WorkSuitability100 " .. VERSION .. "] WARNING: Mining patch failed: " .. tostring(mining_err))
+    end
+
+    print("[WorkSuitability100 " .. VERSION .. "] Work-speed tables patched: " .. tostring(changed))
     return changed
 end
 
