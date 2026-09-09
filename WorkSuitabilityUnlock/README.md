@@ -1,12 +1,12 @@
-# WorkSuitabilityUnlock v0.1
+# WorkSuitabilityUnlock v0.3
 
 Standalone UE4SS Lua mod for Palworld.
 
 ## Goal
 
-Allows Applied Work Suitability Handbooks to pass the game's normal `CanUseTargetWorkSuitabilityRankUp` eligibility check even when the target Pal does not already have that suitability.
+Allows Applied Work Suitability Handbooks to be used on Pals that do not naturally have the corresponding work suitability.
 
-Supported handbook item families:
+Supported handbooks:
 
 - `WorkSuitability_AddTicket_EmitFlame` — Kindling
 - `WorkSuitability_AddTicket_Watering` — Watering
@@ -21,22 +21,26 @@ Supported handbook item families:
 - `WorkSuitability_AddTicket_Transport` — Transporting
 - `WorkSuitability_AddTicket_MonsterFarm` — Farming/Ranching
 
+## v0.3
+
+The previous versions attempted to seed `WorkSuitability_*` reflected properties directly. That was incorrect for the handbook system.
+
+Palworld exposes the actual persistent add-rank mutation as `UPalIndividualCharacterParameter::SetWorkSuitabilityAddRank(EPalWorkSuitability, int32)`. The save parameter also contains `GotWorkSuitabilityAddRankList`. v0.3 therefore leaves the native mutation completely intact and removes only the handbook eligibility gate, while logging the real rank-mutation function when it is reached.
+
 ## Install
 
-Copy the `WorkSuitabilityUnlock` folder into the same UE4SS Mods location used by the other Lua mods. Keep `enabled.txt` and `Scripts/main.lua` in place.
+Copy the `WorkSuitabilityUnlock` folder into the UE4SS `Mods` directory. Keep `enabled.txt` and `Scripts/main.lua` in place.
 
 This mod is independent from `WorkSuitability100` and does not modify its files.
 
-## v0.1 testing target
+## Test
 
-The first implementation overrides the native handbook eligibility function and then lets Palworld's normal handbook transaction execute. This is intentionally minimal so the game's own persistence and rank-up code remains responsible for saving the new suitability.
+Use an Applied Kindling Handbook on a Pal that has no Kindling.
 
-Test with a Pal that has **no Kindling** (or another supported suitability), then use the matching Applied Handbook. If the handbook is accepted but the new suitability is not created, the next patch will target the native mutation/storage path directly.
+Expected log entries include:
 
-## Log
+`[WorkSuitabilityUnlock v0.3] Handbook eligibility override: EmitFlame`
 
-Look for lines beginning with:
+and, if the native transaction reaches the mutation stage:
 
-`[WorkSuitabilityUnlock v0.1]`
-
-A successful handbook attempt should log the handbook code, target parameter, and item full name.
+`[WorkSuitabilityUnlock v0.3] SetWorkSuitabilityAddRank called: ...`
