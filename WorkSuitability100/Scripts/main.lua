@@ -4,10 +4,12 @@ local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = root .. "/Native/WorkSuitability100.dll"
 dll = dll:gsub("\\\\", "/")
 
-local VERSION = "v3.3"
+local VERSION = "v3.4"
 local TARGET_RANK = 100
 local SPEED_HOOK = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability"
-local SPEED_PER_RANK = 0.95 -- rank 30 = 20.0x, rank 47 = 36.15x, rank 100 = 86.5x
+-- Rank 30 = 100x. Linear scaling from rank 10 (1x):
+-- factor = 1 + (rank - 10) * 4.95
+local SPEED_PER_RANK = 4.95
 
 print("[WorkSuitability100 " .. VERSION .. "] Loading native DLL: " .. dll)
 
@@ -188,7 +190,6 @@ local function install_speed_hook()
         local pre, post = RegisterHook(
             SPEED_HOOK,
             function(Context, WorkSuitability)
-                -- Required native pre-hook. Leave the original function untouched.
             end,
             function(Context, WorkSuitability, ReturnValue)
                 local ok_calc, scaled = pcall(function()
@@ -239,7 +240,7 @@ local function install_speed_hook()
 
     speed_hook_registered = true
     print("[WorkSuitability100 " .. VERSION .. "] Speed hook registered: " .. SPEED_HOOK)
-    print("[WorkSuitability100 " .. VERSION .. "] Speed scaling: rank 10 = 1x, rank 30 = 20x, rank 47 = 36.15x, rank 100 = 86.5x")
+    print("[WorkSuitability100 " .. VERSION .. "] Speed scaling: rank 10 = 1x, rank 20 = 50.5x, rank 30 = 100x, rank 47 = 184.15x, rank 100 = 446.5x")
     return true
 end
 
