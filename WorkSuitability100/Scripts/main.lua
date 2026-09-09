@@ -4,7 +4,7 @@ local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = root .. "/Native/WorkSuitability100.dll"
 dll = dll:gsub("\\\\", "/")
 
-local VERSION = "v3.0"
+local VERSION = "v3.1"
 local TARGET_RANK = 100
 local SPEED_HOOK = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability"
 
@@ -27,9 +27,11 @@ if not init_ok then
 end
 print("[WorkSuitability100 " .. VERSION .. "] Native loader initialized.")
 
-local function set_rank_cap(settings)
+local settings = nil
+
+local function set_rank_cap(game_settings)
     local ok_set, err = pcall(function()
-        settings.WorkSuitabilityMaxRank = TARGET_RANK
+        game_settings.WorkSuitabilityMaxRank = TARGET_RANK
     end)
     if not ok_set then
         print("[WorkSuitability100 " .. VERSION .. "] ERROR: failed to set WorkSuitabilityMaxRank: " .. tostring(err))
@@ -37,7 +39,7 @@ local function set_rank_cap(settings)
     end
 
     local verify_ok, value = pcall(function()
-        return settings.WorkSuitabilityMaxRank
+        return game_settings.WorkSuitabilityMaxRank
     end)
     if verify_ok and tonumber(value) == TARGET_RANK then
         print("[WorkSuitability100 " .. VERSION .. "] WorkSuitabilityMaxRank = " .. TARGET_RANK)
@@ -48,6 +50,46 @@ local function set_rank_cap(settings)
     return false
 end
 
+local function get_speed10(work_suitability)
+    if not settings or not settings:IsValid() then
+        return nil
+    end
+
+    local find_ok, value = pcall(function()
+        local work_map = settings.WorkSuitabilityDefineDataMap
+        if not work_map then
+            return nil
+        end
+        return work_map:Find(work_suitability)
+    end)
+    if not find_ok or value == nil then
+        return nil
+    end
+
+    local row_ok, row = pcall(function()
+        return value:get()
+    end)
+    if not row_ok or row == nil or row.CraftSpeeds == nil then
+        return nil
+    end
+
+    local count_ok, count = pcall(function()
+        return row.CraftSpeeds:GetArrayNum()
+    end)
+    if not count_ok or tonumber(count) == nil or tonumber(count) < 11 then
+        return nil
+    end
+
+    local speed_ok, speed10 = pcall(function()
+        return tonumber(row.CraftSpeeds[10])
+    end)
+    if not speed_ok or not speed10 or speed10 <= 0 then
+        return nil
+    end
+
+    return speed10
+end
+
 local speed_hook_registered = false
 
 local function install_speed_hook()
@@ -55,7 +97,6 @@ local function install_speed_hook()
         return true
     end
 
-    local settings = FindFirstOf("PalGameSetting")
     if not settings or not settings:IsValid() then
         print("[WorkSuitability100 " .. VERSION .. "] PalGameSetting not available for speed hook yet.")
         return false
@@ -65,71 +106,48 @@ local function install_speed_hook()
         local pre, post = RegisterHook(
             SPEED_HOOK,
             function(Context, WorkSuitability)
-                -- Intentionally empty. The native function must execute normally.
+                -- Keep the original native function untouched.
             end,
             function(Context, WorkSuitability)
-                local rank_ok, rank = pcall(function()
-                    local value = WorkSuitability and WorkSuitability:get()
-                    if type(value) ~= "number" then
+                local ok_calc, scaled = pcall(function()
+                    if not Context or not WorkSuitability then
                         return nil
                     end
-                    return tonumber(Context:GetWorkSuitabilityRank(value))
-                end)
 
-                rank = rank_ok and rank or nil
-                if not rank or rank <= 10 or rank > TARGET_RANK then
-                    return nil
-                end
-
-                -- Rank 30 = 20x, with rank 10 = 1x.
-                -- Linear growth: factor = 1 + (rank - 10) * 0.95
-                local factor = 1.0 + ((rank - 10) * 0.95)
-                local original_ok, original = pcall(function()
-                    return ReturnValue
-                end)
-                original = original_ok and tonumber(original) or nil
-
-                -- Get the vanilla rank-10 speed from the settings table when available.
-                -- This is deliberately kept independent of TArray growth.
-                local speed10 = nil
-                local find_ok, value = pcall(function()
-                    local work_map = settings.WorkSuitabilityDefineDataMap
-                    if not work_map then
+                    local ws = WorkSuitability:get()
+                    if type(ws) ~= "number" then
                         return nil
                     end
-                    return work_map:Find(WorkSuitability:get())
-                end)
-                if find_ok and value ~= nil then
-                    local row_ok, row = pcall(function() return value:get() end)
-                    if row_ok and row ~= nil and row.CraftSpeeds ~= nil then
-                        local count_ok, count = pcall(function() return row.CraftSpeeds:GetArrayNum() end)
-                        if count_ok and tonumber(count) and tonumber(count) >= 11 then
-                            local speed_ok, candidate = pcall(function() return tonumber(row.CraftSpeeds[10]) end)
-                            if speed_ok and candidate and candidate > 0 then
-                                speed10 = candidate
-                            end
-                        end
+
+                    local rank = tonumber(Context:GetWorkSuitabilityRank(ws))
+                    if not rank or rank <= 10 or rank > TARGET_RANK then
+                        return nil
                     end
+
+                    local speed10 = get_speed10(ws)
+                    if not speed10 then
+                        print("[WorkSuitability100 " .. VERSION .. "] WARNING: no rank-10 CraftSpeed found for WorkSuitability=" .. tostring(ws) .. " rank=" .. tostring(rank))
+                        return nil
+                    end
+
+                    -- Rank 30 = 20x. Rank 10 = 1x.
+                    -- Linear growth factor = 1 + (rank - 10) * 0.95.
+                    local factor = 1.0 + ((rank - 10) * 0.95)
+                    local result = math.floor((speed10 * factor) + 0.5)
+                    if result < 1 then
+                        result = 1
+                    end
+
+                    print("[WorkSuitability100 " .. VERSION .. "] SPEED override: ws=" .. tostring(ws) .. " rank=" .. tostring(rank) .. " vanilla10=" .. tostring(speed10) .. " factor=" .. string.format("%.2f", factor) .. " result=" .. tostring(result))
+                    return result
+                end)
+
+                if ok_calc then
+                    return scaled
                 end
 
-                -- If the table lookup is unavailable, use the native return as the baseline.
-                -- At rank 10 vanilla returns the rank-10 speed, so this still scales correctly.
-                if not speed10 then
-                    speed10 = original
-                end
-
-                if not speed10 or speed10 <= 0 then
-                    print("[WorkSuitability100 " .. VERSION .. "] WARNING: unable to determine speed baseline for WorkSuitability=" .. tostring(WorkSuitability:get()) .. " rank=" .. tostring(rank))
-                    return nil
-                end
-
-                local scaled = math.floor((speed10 * factor) + 0.5)
-                if scaled < 1 then
-                    scaled = 1
-                end
-
-                print("[WorkSuitability100 " .. VERSION .. "] SPEED override: WorkSuitability=" .. tostring(WorkSuitability:get()) .. " rank=" .. tostring(rank) .. " baseline=" .. tostring(speed10) .. " factor=" .. string.format("%.2f", factor) .. " result=" .. tostring(scaled))
-                return scaled
+                print("[WorkSuitability100 " .. VERSION .. "] ERROR: speed callback failed: " .. tostring(scaled))
+                return nil
             end
         )
         return true, pre, post
@@ -152,13 +170,13 @@ local function install_speed_hook()
 end
 
 ExecuteInGameThread(function()
-    local settings = FindFirstOf("PalGameSetting")
+    settings = FindFirstOf("PalGameSetting")
     if not settings or not settings:IsValid() then
         print("[WorkSuitability100 " .. VERSION .. "] PalGameSetting not available yet; retrying initialization.")
         ExecuteInGameThread(function()
-            local retry_settings = FindFirstOf("PalGameSetting")
-            if retry_settings and retry_settings:IsValid() then
-                set_rank_cap(retry_settings)
+            settings = FindFirstOf("PalGameSetting")
+            if settings and settings:IsValid() then
+                set_rank_cap(settings)
                 install_speed_hook()
             else
                 print("[WorkSuitability100 " .. VERSION .. "] ERROR: PalGameSetting still unavailable on retry.")
