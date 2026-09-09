@@ -6,39 +6,52 @@ on:
     paths:
       - '.github/tools/analyze_speed_path.py'
       - '.github/tools/analyze_speed_targets.py'
+      - '.github/tools/analyze_speed_native.py'
       - '.github/workflows/analyze-speed-only.yml'
       - 'PalworldEXE/Palworld-Win64-Shipping.exe'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   analyze-speed:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository with LFS
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          lfs: true
+
+      - name: Acquire current Palworld EXE
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/Animuuufx/PalworldAbilityLvl100/releases/download/Palworld-Win64-Shipping.exe/Palworld-Win64-Shipping.exe'
+          Invoke-WebRequest -Uri $url -OutFile PalworldEXE/Palworld-Win64-Shipping.exe -UseBasicParsing
 
       - name: Verify EXE
         shell: pwsh
         run: |
           if (-not (Test-Path PalworldEXE/Palworld-Win64-Shipping.exe)) { throw 'Palworld EXE not found.' }
           Get-FileHash PalworldEXE/Palworld-Win64-Shipping.exe -Algorithm SHA256
+          (Get-Item PalworldEXE/Palworld-Win64-Shipping.exe).Length
 
       - name: Install Capstone
         shell: pwsh
         run: python -m pip install capstone
 
-      - name: Analyze speed targets
+      - name: Analyze native speed path
         shell: pwsh
-        run: python .github/tools/analyze_speed_targets.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object speed_targets.txt
+        run: |
+          New-Item -ItemType Directory -Force -Path WorkSuitability100/analysis | Out-Null
+          python .github/tools/analyze_speed_native.py PalworldEXE/Palworld-Win64-Shipping.exe | Tee-Object WorkSuitability100/analysis/speed_native.txt
 
-      - name: Upload speed analysis
-        uses: actions/upload-artifact@v4
-        with:
-          name: palworld-speed-targets
-          path: speed_targets.txt
+      - name: Commit analysis report
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add WorkSuitability100/analysis/speed_native.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+          git commit -m 'chore: update native work speed analysis'
+          git push
