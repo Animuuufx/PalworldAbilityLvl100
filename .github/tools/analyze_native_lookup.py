@@ -33,14 +33,8 @@ def findall(d,p):
         if i<0:return
         yield i; s=i+1
 
-def main():
-    d=Path(sys.argv[1]).read_bytes(); ss=sections(d); pe=u32(d,0x3c); base=struct.unpack_from('<Q',d,pe+24+24)[0]
-    names=[b'GetCraftSpeedByWorkSuitability',b'CanUseTargetWorkSuitabilityRankUp',b'WorkSuitabilityMaxRank',b'GetWorkSuitabilityRank',b'GetWorkSuitabilityRankWithCharacterRank',b'HasWorkSuitabilityRank',b'GetCraftSpeed_WorkSuitability']
-    md=Cs(CS_ARCH_X86,CS_MODE_64)
-    md.detail=True
-    print('NATIVE_LOOKUP_EXACT:')
-    seen=set()
-    candidates={}
+def native_candidates(d,ss,base,names):
+    seen=set(); candidates={}
     for name in names:
         for fo in findall(d,name):
             r=fo_to_rva(fo,ss)
@@ -49,8 +43,6 @@ def main():
             for sec,va,rs,rp,vs,ch in ss:
                 for pfo in findall(d[rp:rp+rs],ptr):
                     at=rp+pfo
-                    # UE native lookup entries are expected to be {NamePtr, FunctionPtr}.
-                    # Accept only the immediate +8 or -8 neighbor, rather than a broad window.
                     for q in (at-8,at):
                         if q<0 or q+16>len(d): continue
                         a=u64(d,q); b=u64(d,q+8)
@@ -61,24 +53,60 @@ def main():
                         if native is None: continue
                         key=(name,native,pair)
                         if key in seen: continue
-                        seen.add(key); candidates[native]=True
+                        seen.add(key); candidates.setdefault(name.decode(),[]).append(native)
                         tag=' reversed' if reversed_pair else ''
                         print(f'{name.decode()} string_rva=0x{r:X} pair_rva=0x{fo_to_rva(pair,ss):X} native_rva=0x{native:X}{tag}')
+    return candidates
+
+def disasm_function(d,ss,base,rva,limit=768):
+    fo=rva_to_fo(rva,ss)
+    if fo is None: return
+    md=Cs(CS_ARCH_X86,CS_MODE_64); md.detail=True
+    ins=list(md.disasm(d[fo:fo+limit],base+rva))
+    print(f'FOCUS_FUNCTION RVA=0x{rva:X} FILE=0x{fo:X}')
+    for i in ins:
+        rel=i.address-(base+rva)
+        text=f'+0x{rel:03X}: {i.mnemonic} {i.op_str}'.rstrip()
+        if ('0xa' in i.op_str.lower() or '0x64' in i.op_str.lower() or
+            i.mnemonic in ('cmp','mov','lea','add','sub','test','and','or','call','jmp','je','jne','jg','jge','jl','jle','ja','jae','jb','jbe','ret')):
+            print('  '+text)
+    # Raw bytes around every immediate-10 instruction.
+    for i in ins:
+        if '0xa' not in i.op_str.lower(): continue
+        rel=i.address-(base+rva)
+        start=max(0,i.address-(base+rva)-12)
+        end=min(len(d)-fo,i.address-(base+rva)+20)
+        b=d[fo+start:fo+end]
+        print('  IMM10_BYTES +0x%03X: %s' % (rel,b.hex(' ')))
+    print('END_FOCUS_FUNCTION')
+
+def main():
+    d=Path(sys.argv[1]).read_bytes(); ss=sections(d); pe=u32(d,0x3c); base=struct.unpack_from('<Q',d,pe+24+24)[0]
+    names=[b'GetCraftSpeedByWorkSuitability',b'CanUseTargetWorkSuitabilityRankUp',b'WorkSuitabilityMaxRank',b'GetWorkSuitabilityRank',b'GetWorkSuitabilityRankWithCharacterRank',b'HasWorkSuitabilityRank',b'GetCraftSpeed_WorkSuitability']
+    md=Cs(CS_ARCH_X86,CS_MODE_64); md.detail=True
+    print('NATIVE_LOOKUP_EXACT:')
+    candidates=native_candidates(d,ss,base,names)
     print('NATIVE_FUNCTION_DISASM:')
-    for r in sorted(candidates):
+    all_native=sorted({r for vals in candidates.values() for r in vals})
+    for r in all_native:
         fo=rva_to_fo(r,ss)
         if fo is None: continue
-        code=d[fo:fo+192]
-        ins=list(md.disasm(code,base+r))
+        ins=list(md.disasm(d[fo:fo+192],base+r))
         print(f'FUNCTION RVA=0x{r:X} FILE=0x{fo:X}')
         for i in ins[:24]:
             print(f'  +0x{i.address-(base+r):03X}: {i.mnemonic} {i.op_str}')
-        # Highlight instructions using immediate 10 or 100 and direct returns/jumps.
         hits=[]
         for i in ins[:64]:
             if i.mnemonic in ('cmp','mov','lea','add','sub','test','and','or','call','jmp','je','jne','jg','jge','jl','jle','ja','jae','jb','jbe','ret'):
                 if '0xa' in i.op_str.lower() or '0x64' in i.op_str.lower() or i.mnemonic=='ret': hits.append(f'+0x{i.address-(base+r):03X}: {i.mnemonic} {i.op_str}')
         for h in hits: print('  HIT '+h)
+    print('FOCUSED_CURRENT_WORKSUITABILITY:')
+    focus=[0x2BB12C0,0x2BB6850,0x2B75390,0x2B740A0,0x28DE8E0,0x295CF70,0x295D190,
+           0x295D1C0,0x29621E0,0x2962250,0x2962290]
+    seen_focus=set()
+    for r in focus:
+        if r in seen_focus: continue
+        seen_focus.add(r); disasm_function(d,ss,base,r)
     print('END_NATIVE_ANALYSIS')
 
 if __name__=='__main__': main()
