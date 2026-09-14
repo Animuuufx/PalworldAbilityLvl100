@@ -8,61 +8,52 @@ Experimental Palworld UE4SS mod for teaching Pal active skills to **players and 
 
 ## Current build
 
-`v0.1.0-probe`
+`v0.1.1-safe`
 
-This is the first compatibility build for the current Palworld executable. It intentionally discovers the live fruit-use and player-skill functions before calling them. That avoids hard-coding an outdated `ProcessEvent` signature and crashing the game after a Palworld update.
+This is a stability baseline after the original v0.1.0 runtime probe crashed while entering a world on the current Palworld/UE4SS build.
 
-## Target behavior
+## Crash fix in v0.1.1
 
-- Players can consume normal Skill Fruits.
-- Captured/recruited human NPCs can consume normal Skill Fruits.
-- Fruit-taught attacks are stored as learned active skills (`MasteredWaza`) instead of a mod-only fake list.
-- Human NPCs can equip learned attacks in their normal `EquipWaza` slots.
-- The player receives a skill bar built from learned fruit skills.
-- Skill slots are usable from hotkeys and retain normal per-skill cooldown behavior once the current player-cast entry point is resolved.
-- Duplicate fruit skills are rejected.
-- Learning data should persist through the normal character/NPC save data rather than a separate save file.
+Removed all automatic world-entry behavior:
 
-## v0.1 probe controls
+- no `LoopAsync` polling
+- no `FindFirstOf`/player lookup during world entry
+- no reflected `ForEachFunction` class scan
+- no `MasteredWaza` or `EquipWaza` array access during loading
+- no `StaticFindObject` / `PrintString` calls during loading
+- no automatic skill-bar rendering during loading
+- no guessed `ProcessEvent` or Waza calls
 
-- `Alt + 1` through `Alt + 8`: select one of the player's learned fruit skills.
-- `Alt + F8`: dump the player's `MasteredWaza`, `EquipWaza`, and current runtime skill/fruit/item function candidates to `UE4SS.log`.
-- The build also displays a temporary on-screen `Skill Fruit Bar` generated from the player's learned `MasteredWaza` list.
+The only active feature in this build is a safe Lua hotkey test. `Alt + F8` writes a log line and does not touch any Unreal object.
 
-## Install for testing
+## Test this build first
 
-Copy the whole `HumanSkillFruits` folder into:
+Copy/replace the whole `HumanSkillFruits` folder in:
 
 `Palworld\Pal\Binaries\Win64\ue4ss\Mods\HumanSkillFruits`
 
-The existing `enabled.txt` enables it on UE4SS installs that support that convention. If the current UE4SS install uses `mods.txt`, add:
+Fully restart Palworld and enter the same world that crashed previously.
 
-`HumanSkillFruits : 1`
+If the world loads normally, press `Alt + F8`. `UE4SS.log` should contain:
 
-Then fully restart Palworld.
+`[HumanSkillFruits v0.1.1-safe] Alt+F8 hotkey received. No Unreal objects were accessed.`
 
-## First compatibility test
+If it still crashes before entering the world, send the end of `UE4SS.log` from that run because that would indicate the crash is outside the removed runtime probe.
 
-1. Load a world and wait until the player can move.
-2. Press `Alt + F8` once.
-3. If the player already has any fruit-taught skills, the bar will list them.
-4. Close the game and inspect `UE4SS.log` for lines beginning with `[HumanSkillFruits v0.1.0-probe]`.
-5. The runtime probe reports the current executable's player/controller/character-parameter functions containing `Waza`, `Skill`, `Fruit`, `Attack`, or `Item`. Those names are used to wire the final safe cast and fruit-target hooks without guessing signatures.
+## Target behavior
 
-## Why MasteredWaza + EquipWaza
+The finished mod will provide:
 
-Palworld's save format distinguishes learned/taught active moves from equipped active moves. Fruit-taught extras belong in `MasteredWaza`, while currently equipped active attacks are represented by `EquipWaza`. Using those game-owned lists is preferable to maintaining a parallel mod-only skill database because the skills remain part of the actual character data.
+- Players can consume normal Skill Fruits.
+- Captured/recruited human NPCs can consume normal Skill Fruits.
+- Fruit-taught attacks are stored as learned active skills (`MasteredWaza`).
+- Human NPCs can equip learned attacks through their normal skill data.
+- The player gets a usable skill bar for learned fruit skills.
+- Skill-bar abilities retain normal cooldowns.
+- Duplicate learned skills are rejected.
+- One fruit is consumed only after learning succeeds.
+- Learned skills persist with the character/NPC.
 
-## Planned v0.2
+## Development approach after stability test
 
-- Patch the Skill Fruit target validation so Player and Human targets are accepted.
-- Resolve Skill Fruit item -> `EPalWazaID` from the live item/master-data row.
-- Add learned skill to the target's `MasteredWaza` using the game's own function/path where available.
-- Auto-fill an empty `EquipWaza` slot for human NPCs.
-- Consume exactly one fruit only after learning succeeds.
-- Wire player skill-bar slots to the current executable's Waza action/cast path.
-- Track cooldowns and reject casts while the selected skill is cooling down.
-
-## Safety choice in v0.1
-
-The probe does **not** invoke guessed Waza functions. Calling a reflected Unreal function with the wrong parameter layout can corrupt memory or crash Palworld even when wrapped in Lua `pcall`. The first live log gives the correct candidates for this game build, after which the cast/consume path can be bound precisely.
+The unsafe broad runtime reflection scan will not be restored. Function hooks and save-data access will be added back one subsystem at a time against known current-build Palworld functions so any compatibility problem can be isolated immediately.
