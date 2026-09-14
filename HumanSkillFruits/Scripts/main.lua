@@ -1,4 +1,4 @@
-local VERSION = "v0.1.3-player-probe"
+local VERSION = "v0.1.4-parameter-probe"
 local TAG = "[HumanSkillFruits " .. VERSION .. "]"
 
 local source = debug.getinfo(1, "S").source
@@ -25,12 +25,20 @@ local function write_status(lines)
     end
 end
 
-local function run_player_probe()
-    log("Alt+F8 received; scheduling one manual player lookup.")
+local function full_name(obj, fallback)
+    if obj == nil then return fallback or "<nil>" end
+    local ok, value = pcall(function() return obj:GetFullName() end)
+    if ok and value ~= nil then return tostring(value) end
+    return fallback or "<object found>"
+end
+
+local function run_parameter_probe()
+    log("Alt+F8 received; scheduling one manual player + CharacterParameterComponent lookup.")
 
     if ExecuteInGameThread == nil then
-        log("ExecuteInGameThread unavailable; probe cancelled without UObject access.")
-        write_status({"Probe cancelled: ExecuteInGameThread unavailable."})
+        local message = "ExecuteInGameThread unavailable; probe cancelled."
+        log(message)
+        write_status({message})
         return
     end
 
@@ -54,23 +62,47 @@ local function run_player_probe()
             return
         end
 
-        -- Do not enumerate properties/functions and do not touch skill arrays yet.
-        -- This name read is the only additional UObject operation in this build.
-        local object_name = "<player object found>"
-        local ok_name, name_or_err = pcall(function()
-            return player:GetFullName()
+        local player_name = full_name(player, "<player object found>")
+        log("Player found: " .. player_name)
+
+        -- Public Palworld SDK references expose CharacterParameterComponent
+        -- directly on PalPlayerCharacter. Read ONLY this one known property.
+        local ok_component, component_or_err = pcall(function()
+            return player.CharacterParameterComponent
         end)
-        if ok_name and name_or_err ~= nil then
-            object_name = tostring(name_or_err)
-        else
-            log("Player object found; GetFullName was unavailable, continuing safely.")
+
+        if not ok_component then
+            local message = "CharacterParameterComponent read failed safely: " .. tostring(component_or_err)
+            log(message)
+            write_status({
+                "SUCCESS: player found.",
+                "Player: " .. player_name,
+                message
+            })
+            return
         end
 
-        log("SUCCESS: player object found: " .. object_name)
+        local component = component_or_err
+        if component == nil then
+            local message = "CharacterParameterComponent was nil."
+            log(message)
+            write_status({
+                "SUCCESS: player found.",
+                "Player: " .. player_name,
+                message
+            })
+            return
+        end
+
+        local component_name = full_name(component, "<CharacterParameterComponent object found>")
+        log("SUCCESS: CharacterParameterComponent found: " .. component_name)
+
         write_status({
             "SUCCESS: PalPlayerCharacter found.",
-            "Object: " .. object_name,
-            "No reflection scan, property enumeration, TArray access, skill access, hooks, or polling were performed."
+            "Player: " .. player_name,
+            "SUCCESS: CharacterParameterComponent found.",
+            "Component: " .. component_name,
+            "No IndividualParameter, SaveParameter, MasteredWaza, EquipWaza, reflection scan, TArray access, writes, hooks, timers, or polling were used."
         })
     end)
 end
@@ -82,11 +114,11 @@ local function register_probe_hotkey()
     end
 
     local ok, err = pcall(function()
-        RegisterKeyBind(Key.F8, {ModifierKey.ALT}, run_player_probe)
+        RegisterKeyBind(Key.F8, {ModifierKey.ALT}, run_parameter_probe)
     end)
 
     if ok then
-        log("Registered Alt+F8 manual player probe.")
+        log("Registered Alt+F8 manual CharacterParameterComponent probe.")
     else
         log("Alt+F8 registration failed: " .. tostring(err))
     end
