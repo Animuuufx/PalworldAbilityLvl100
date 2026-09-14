@@ -1,4 +1,4 @@
-local VERSION = "v0.1.4-parameter-probe"
+local VERSION = "v0.1.5-individual-probe"
 local TAG = "[HumanSkillFruits " .. VERSION .. "]"
 
 local source = debug.getinfo(1, "S").source
@@ -19,7 +19,6 @@ local function write_status(lines)
         end
         file:close()
     end)
-
     if not ok then
         log("Could not write probe status file: " .. tostring(err))
     end
@@ -32,8 +31,8 @@ local function full_name(obj, fallback)
     return fallback or "<object found>"
 end
 
-local function run_parameter_probe()
-    log("Alt+F8 received; scheduling one manual player + CharacterParameterComponent lookup.")
+local function run_individual_probe()
+    log("Alt+F8 received; scheduling one manual player -> CharacterParameterComponent -> IndividualParameter lookup.")
 
     if ExecuteInGameThread == nil then
         local message = "ExecuteInGameThread unavailable; probe cancelled."
@@ -46,63 +45,73 @@ local function run_parameter_probe()
         local ok_find, player_or_err = pcall(function()
             return FindFirstOf("PalPlayerCharacter")
         end)
-
-        if not ok_find then
-            local message = "PalPlayerCharacter lookup failed safely: " .. tostring(player_or_err)
+        if not ok_find or player_or_err == nil then
+            local message = ok_find and "PalPlayerCharacter lookup returned nil." or ("PalPlayerCharacter lookup failed safely: " .. tostring(player_or_err))
             log(message)
             write_status({message})
             return
         end
 
         local player = player_or_err
-        if player == nil then
-            local message = "PalPlayerCharacter lookup returned nil."
-            log(message)
-            write_status({message})
-            return
-        end
-
         local player_name = full_name(player, "<player object found>")
         log("Player found: " .. player_name)
 
-        -- Public Palworld SDK references expose CharacterParameterComponent
-        -- directly on PalPlayerCharacter. Read ONLY this one known property.
         local ok_component, component_or_err = pcall(function()
             return player.CharacterParameterComponent
         end)
-
-        if not ok_component then
-            local message = "CharacterParameterComponent read failed safely: " .. tostring(component_or_err)
+        if not ok_component or component_or_err == nil then
+            local message = ok_component and "CharacterParameterComponent was nil." or ("CharacterParameterComponent read failed safely: " .. tostring(component_or_err))
             log(message)
-            write_status({
-                "SUCCESS: player found.",
-                "Player: " .. player_name,
-                message
-            })
+            write_status({"Player: " .. player_name, message})
             return
         end
 
         local component = component_or_err
-        if component == nil then
-            local message = "CharacterParameterComponent was nil."
+        local component_name = full_name(component, "<CharacterParameterComponent object found>")
+        log("CharacterParameterComponent found: " .. component_name)
+
+        -- Known Palworld data chain:
+        -- PalPlayerCharacter -> CharacterParameterComponent -> IndividualParameter.
+        -- This build reads ONLY that one additional property. It does not touch
+        -- SaveParameter or any skill arrays yet.
+        local ok_individual, individual_or_err = pcall(function()
+            return component.IndividualParameter
+        end)
+
+        if not ok_individual then
+            local message = "IndividualParameter read failed safely: " .. tostring(individual_or_err)
             log(message)
             write_status({
-                "SUCCESS: player found.",
                 "Player: " .. player_name,
+                "Component: " .. component_name,
                 message
             })
             return
         end
 
-        local component_name = full_name(component, "<CharacterParameterComponent object found>")
-        log("SUCCESS: CharacterParameterComponent found: " .. component_name)
+        local individual = individual_or_err
+        if individual == nil then
+            local message = "IndividualParameter was nil."
+            log(message)
+            write_status({
+                "Player: " .. player_name,
+                "Component: " .. component_name,
+                message
+            })
+            return
+        end
+
+        local individual_name = full_name(individual, "<IndividualParameter object found>")
+        log("SUCCESS: IndividualParameter found: " .. individual_name)
 
         write_status({
             "SUCCESS: PalPlayerCharacter found.",
             "Player: " .. player_name,
             "SUCCESS: CharacterParameterComponent found.",
             "Component: " .. component_name,
-            "No IndividualParameter, SaveParameter, MasteredWaza, EquipWaza, reflection scan, TArray access, writes, hooks, timers, or polling were used."
+            "SUCCESS: IndividualParameter found.",
+            "Individual: " .. individual_name,
+            "No SaveParameter, MasteredWaza, EquipWaza, reflection scan, TArray access, writes, hooks, timers, or polling were used."
         })
     end)
 end
@@ -114,11 +123,11 @@ local function register_probe_hotkey()
     end
 
     local ok, err = pcall(function()
-        RegisterKeyBind(Key.F8, {ModifierKey.ALT}, run_parameter_probe)
+        RegisterKeyBind(Key.F8, {ModifierKey.ALT}, run_individual_probe)
     end)
 
     if ok then
-        log("Registered Alt+F8 manual CharacterParameterComponent probe.")
+        log("Registered Alt+F8 manual IndividualParameter probe.")
     else
         log("Alt+F8 registration failed: " .. tostring(err))
     end
