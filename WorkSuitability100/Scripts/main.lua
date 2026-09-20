@@ -3,7 +3,7 @@ local script = source:sub(1, 1) == "@" and source:sub(2) or source
 local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = (root .. "/Native/WorkSuitability100.dll"):gsub("\\\\", "/")
 
-local VERSION = "v4.2.1"
+local VERSION = "v4.3"
 local TARGET_RANK = 100
 
 -- Rank 30 remains around 100x rank-10 throughput.
@@ -17,14 +17,6 @@ local RECENT_CRAFT_SCALE_SECONDS = 0.75
 local MULTITYPE_PROGRESS_HOOK = "/Script/Pal.PalWorkProgressMultiType:AddProgressForWorkType"
 
 local CRAFT_HOOKS = {
-    {
-        -- A large part of the live work system (including newer production
-        -- buildings) asks the actor component for work speed instead of
-        -- calling UPalIndividualCharacterParameter directly.
-        path = "/Script/Pal.PalCharacterParameterComponent:GetCraftSpeed_WorkSuitability",
-        label = "Component:GetCraftSpeed_WorkSuitability",
-        explicit_suitability = true,
-    },
     {
         path = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability",
         label = "GetCraftSpeedByWorkSuitability",
@@ -150,28 +142,6 @@ local function current_settings()
     end
 
     return nil
-end
-
-local runtime_ready = false
-
-local function is_runtime_ready()
-    if runtime_ready then return true end
-
-    -- CharacterParameterComponent speed functions are also called while a save
-    -- is being reconstructed. Do not inspect those partially initialized
-    -- objects. Once the local player character exists, normal world work has
-    -- started and the component path is safe to scale.
-    local ok, player = pcall(function()
-        return FindFirstOf("PalPlayerCharacter")
-    end)
-
-    if ok and player and is_valid(player) then
-        runtime_ready = true
-        print("[WorkSuitability100 " .. VERSION .. "] Runtime world ready; component scaling enabled.")
-        return true
-    end
-
-    return false
 end
 
 local function character_parameter_from_context(context)
@@ -328,14 +298,6 @@ end
 local function scale_craft_result(context, suitability, return_value, label)
     local frame, parent = finish_craft_frame()
 
-    -- The component path is hit during save reconstruction, before its
-    -- IndividualParameter is safe to dereference. Ignore it until the local
-    -- player exists; this prevents load-save crashes while keeping the live
-    -- work hook available once gameplay begins.
-    if tostring(label):sub(1, 10) == "Component:" and not is_runtime_ready() then
-        return nil
-    end
-
     -- If a nested craft-speed function already produced the turbo value,
     -- leave the outer function alone. This is important for newer buildings
     -- that combine multiple suitability-speed calls (Ancient Furnace, etc.).
@@ -476,6 +438,85 @@ local function rank10_resource_value(source, field)
 
     if ok then return value end
     return nil
+end
+
+local UTILITY_WORK_SPEED_HOOK = "/Script/Pal.PalUtility:GetWorkSpeed"
+
+local function character_parameter_from_character(character)
+    local target = unwrap(character)
+    if not target or not is_valid(target) then return nil end
+
+    local ok_component, component = pcall(function()
+        return target:GetCharacterParameterComponent()
+    end)
+    component = ok_component and unwrap(component) or nil
+    if not component or not is_valid(component) then return nil end
+
+    return character_parameter_from_context(component)
+end
+
+local function register_utility_work_speed_hook()
+    if registered[UTILITY_WORK_SPEED_HOOK] then return true end
+
+    local ok, pre_id, post_id = pcall(function()
+        return RegisterHook(
+            UTILITY_WORK_SPEED_HOOK,
+            function(Context, Character)
+                return nil
+            end,
+            function(Context, Character, ReturnValue)
+                local ok_scale, result = pcall(function()
+                    local parameter = character_parameter_from_character(Character)
+                    if not parameter then return nil end
+
+                    local ws = current_suitability(parameter)
+                    if ws == nil or ws <= 0 then return nil end
+
+                    local rank = effective_rank(parameter, ws)
+                    if not rank or rank <= 10 then return nil end
+
+                    -- If a lower-level craft-speed getter was already boosted
+                    -- inside this GetWorkSpeed call, do not multiply twice.
+                    if was_recently_craft_scaled(parameter, ws) then
+                        log_scale_once(
+                            "PalUtility:GetWorkSpeed(native-speed-path)",
+                            ws,
+                            rank,
+                            to_number(ReturnValue),
+                            to_number(ReturnValue)
+                        )
+                        return nil
+                    end
+
+                    local base = to_number(ReturnValue)
+                    if not base or base <= 0 then
+                        base = rank10_craft_speed(ws)
+                    end
+                    if not base or base <= 0 then return nil end
+
+                    local scaled = scaled_number(base, rank, MAX_CRAFT_SPEED)
+                    if not scaled then return nil end
+
+                    mark_recent_craft_scale(parameter, ws)
+                    log_scale_once("PalUtility:GetWorkSpeed", ws, rank, base, scaled)
+                    return scaled
+                end)
+
+                if ok_scale then return result end
+                print("[WorkSuitability100 " .. VERSION .. "] ERROR: PalUtility:GetWorkSpeed callback failed: " .. tostring(result))
+                return nil
+            end
+        )
+    end)
+
+    if not ok or not pre_id or not post_id then
+        print("[WorkSuitability100 " .. VERSION .. "] WARNING: hook unavailable: " .. UTILITY_WORK_SPEED_HOOK .. " (" .. tostring(pre_id) .. ")")
+        return false
+    end
+
+    registered[UTILITY_WORK_SPEED_HOOK] = { pre = pre_id, post = post_id }
+    print("[WorkSuitability100 " .. VERSION .. "] Hook registered: PalUtility:GetWorkSpeed")
+    return true
 end
 
 local function register_resource_hook(def)
@@ -693,12 +734,14 @@ local function install_runtime_scaling()
         if register_resource_hook(def) then resource_count = resource_count + 1 end
     end
 
+    local utility_work_speed_ok = register_utility_work_speed_hook()
     local multitype_ok = register_multitype_progress_hook()
 
     print(
         "[WorkSuitability100 " .. VERSION .. "] Runtime scaling ready: craft hooks=" ..
         tostring(craft_count) .. "/" .. tostring(#CRAFT_HOOKS) ..
         " resource hooks=" .. tostring(resource_count) .. "/" .. tostring(#RESOURCE_HOOKS) ..
+        " utilityWorkSpeed=" .. tostring(utility_work_speed_ok) ..
         " multitype=" .. tostring(multitype_ok)
     )
     print("[WorkSuitability100 " .. VERSION .. "] Scale targets: rank20=10x rank30=100x rank100=100000x.")
