@@ -1,4 +1,4 @@
-local VERSION = "v0.9"
+local VERSION = "v1.0"
 
 local CAN_USE_HOOK = "/Script/Pal.PalUtility:CanUseTargetWorkSuitabilityRankUp"
 local ADD_RANK_HOOK = "/Script/Pal.PalIndividualCharacterParameter:SetWorkSuitabilityAddRank"
@@ -17,6 +17,7 @@ local handbook_codes = {
     Collection = true,
     Deforest = true,
     Mining = true,
+    OilExtraction = true,
     ProductMedicine = true,
     Cool = true,
     Transport = true,
@@ -32,10 +33,11 @@ local suitability_ids = {
     Collection = 6,
     Deforest = 7,
     Mining = 8,
-    ProductMedicine = 9,
-    Cool = 10,
-    Transport = 11,
-    MonsterFarm = 12,
+    OilExtraction = 9,
+    ProductMedicine = 10,
+    Cool = 11,
+    Transport = 12,
+    MonsterFarm = 13,
 }
 
 local suitability_names = {}
