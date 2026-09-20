@@ -3,7 +3,7 @@ local script = source:sub(1, 1) == "@" and source:sub(2) or source
 local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = (root .. "/Native/WorkSuitability100.dll"):gsub("\\\\", "/")
 
-local VERSION = "v4.0"
+local VERSION = "v4.1"
 local TARGET_RANK = 100
 
 -- Rank 30 remains around 100x rank-10 throughput.
@@ -12,6 +12,9 @@ local TARGET_RANK = 100
 local MAX_CRAFT_SPEED = 1000000000
 local MAX_RESOURCE_RATE = 10000000
 local MAX_COLLECTION_YIELD_FACTOR = 500.0
+local MAX_PROGRESS_AMOUNT = 100000000.0
+local RECENT_CRAFT_SCALE_SECONDS = 0.75
+local MULTITYPE_PROGRESS_HOOK = "/Script/Pal.PalWorkProgressMultiType:AddProgressForWorkType"
 
 local CRAFT_HOOKS = {
     {
@@ -62,6 +65,7 @@ local settings = nil
 local registered = {}
 local craft_stack = {}
 local logged_scale = {}
+local recent_craft_scale = {}
 
 local function unwrap(value)
     if value == nil then return nil end
@@ -200,6 +204,37 @@ local function rank10_craft_speed(suitability)
     return nil
 end
 
+local function object_key(value)
+    local object = unwrap(value)
+    if not object then return "<nil>" end
+
+    local ok, name = pcall(function() return object:GetFullName() end)
+    if ok and name then return tostring(name) end
+    return tostring(object)
+end
+
+local function recent_key(character_parameter, suitability)
+    return object_key(character_parameter) .. "|" .. tostring(to_number(suitability))
+end
+
+local function mark_recent_craft_scale(character_parameter, suitability)
+    recent_craft_scale[recent_key(character_parameter, suitability)] = os.clock()
+end
+
+local function was_recently_craft_scaled(character_parameter, suitability)
+    local key = recent_key(character_parameter, suitability)
+    local when = recent_craft_scale[key]
+    if not when then return false end
+
+    local age = os.clock() - when
+    if age < 0 or age > RECENT_CRAFT_SCALE_SECONDS then
+        recent_craft_scale[key] = nil
+        return false
+    end
+
+    return true
+end
+
 local function log_scale_once(label, suitability, rank, base, result)
     local key = tostring(label) .. "|" .. tostring(suitability) .. "|" .. tostring(rank)
     if logged_scale[key] then return end
@@ -270,6 +305,7 @@ local function scale_craft_result(context, suitability, return_value, label)
     result = math.floor(result + 0.5)
 
     if parent then parent.scaled_child = true end
+    mark_recent_craft_scale(context, ws)
     log_scale_once(label, ws, rank, base, result)
     return result
 end
@@ -427,6 +463,133 @@ local function register_resource_hook(def)
     return true
 end
 
+local function max_assigned_rank_for_work(context, suitability)
+    local work = unwrap(context)
+    local ws = to_number(suitability)
+    if not work or ws == nil then return nil, false, 0 end
+
+    local best_rank = nil
+    local recently_scaled = false
+    local matched_workers = 0
+
+    local ok, err = pcall(function()
+        local rep = work.AssignRepInfoArray
+        local items = rep and rep.Items
+        if not items then return end
+
+        items:ForEach(function(_, entry_param)
+            local entry = unwrap(entry_param)
+            local assign = entry and unwrap(entry.WorkAssign) or nil
+            if not assign or not is_valid(assign) then return false end
+
+            local assign_ws = nil
+            pcall(function()
+                assign_ws = to_number(assign:GetWorkSuitability())
+            end)
+
+            if assign_ws ~= nil and assign_ws ~= ws then
+                return false
+            end
+
+            local character_parameter = nil
+            pcall(function()
+                character_parameter = assign:GetAssignedIndividualParameter()
+            end)
+
+            if not character_parameter or not is_valid(character_parameter) then
+                return false
+            end
+
+            local rank = effective_rank(character_parameter, ws)
+            if not rank then return false end
+
+            matched_workers = matched_workers + 1
+            if not best_rank or rank > best_rank then
+                best_rank = rank
+            end
+
+            if was_recently_craft_scaled(character_parameter, ws) then
+                recently_scaled = true
+            end
+
+            return false
+        end)
+    end)
+
+    if not ok then
+        print("[WorkSuitability100 " .. VERSION .. "] WARNING: multi-type assigned-worker scan failed: " .. tostring(err))
+    end
+
+    return best_rank, recently_scaled, matched_workers
+end
+
+local function register_multitype_progress_hook()
+    if registered[MULTITYPE_PROGRESS_HOOK] then return true end
+
+    local ok, pre_id, post_id = pcall(function()
+        return RegisterHook(
+            MULTITYPE_PROGRESS_HOOK,
+            function(Context, WorkSuitability, Amount)
+                local ok_scale, err = pcall(function()
+                    local ws = to_number(WorkSuitability)
+                    local amount = to_number(Amount)
+                    if ws == nil or not amount or amount <= 0 then return end
+
+                    local rank, recently_scaled, workers =
+                        max_assigned_rank_for_work(Context, ws)
+
+                    if not rank or rank <= 10 then return end
+
+                    -- The standard craft-speed hooks are preferred. If one of
+                    -- the assigned workers was just turbo-scaled there, this
+                    -- progress call is already carrying the boosted speed.
+                    if recently_scaled then
+                        log_scale_once(
+                            "MultiTypeProgress(native-speed-path)",
+                            ws,
+                            rank,
+                            amount,
+                            amount
+                        )
+                        return
+                    end
+
+                    local result = amount * turbo_factor(rank)
+                    if result > MAX_PROGRESS_AMOUNT then
+                        result = MAX_PROGRESS_AMOUNT
+                    end
+
+                    Amount:Set(result)
+                    log_scale_once(
+                        "MultiTypeProgress(fallback workers=" .. tostring(workers) .. ")",
+                        ws,
+                        rank,
+                        amount,
+                        result
+                    )
+                end)
+
+                if not ok_scale then
+                    print("[WorkSuitability100 " .. VERSION .. "] ERROR: multi-type progress callback failed: " .. tostring(err))
+                end
+                return nil
+            end,
+            function(Context, WorkSuitability, Amount)
+                return nil
+            end
+        )
+    end)
+
+    if not ok or not pre_id or not post_id then
+        print("[WorkSuitability100 " .. VERSION .. "] WARNING: hook unavailable: " .. MULTITYPE_PROGRESS_HOOK .. " (" .. tostring(pre_id) .. ")")
+        return false
+    end
+
+    registered[MULTITYPE_PROGRESS_HOOK] = { pre = pre_id, post = post_id }
+    print("[WorkSuitability100 " .. VERSION .. "] Hook registered: MultiTypeProgress")
+    return true
+end
+
 local function set_rank_cap()
     local game_settings = current_settings()
     if not game_settings then
@@ -461,10 +624,13 @@ local function install_runtime_scaling()
         if register_resource_hook(def) then resource_count = resource_count + 1 end
     end
 
+    local multitype_ok = register_multitype_progress_hook()
+
     print(
         "[WorkSuitability100 " .. VERSION .. "] Runtime scaling ready: craft hooks=" ..
         tostring(craft_count) .. "/" .. tostring(#CRAFT_HOOKS) ..
-        " resource hooks=" .. tostring(resource_count) .. "/" .. tostring(#RESOURCE_HOOKS)
+        " resource hooks=" .. tostring(resource_count) .. "/" .. tostring(#RESOURCE_HOOKS) ..
+        " multitype=" .. tostring(multitype_ok)
     )
     print("[WorkSuitability100 " .. VERSION .. "] Scale targets: rank20=10x rank30=100x rank100=100000x.")
 end
