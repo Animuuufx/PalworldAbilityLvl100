@@ -3,7 +3,7 @@ local script = source:sub(1, 1) == "@" and source:sub(2) or source
 local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = (root .. "/Native/WorkSuitability100.dll"):gsub("\\\\", "/")
 
-local VERSION = "v4.1"
+local VERSION = "v4.2"
 local TARGET_RANK = 100
 
 -- Rank 30 remains around 100x rank-10 throughput.
@@ -17,6 +17,19 @@ local RECENT_CRAFT_SCALE_SECONDS = 0.75
 local MULTITYPE_PROGRESS_HOOK = "/Script/Pal.PalWorkProgressMultiType:AddProgressForWorkType"
 
 local CRAFT_HOOKS = {
+    {
+        -- A large part of the live work system (including newer production
+        -- buildings) asks the actor component for work speed instead of
+        -- calling UPalIndividualCharacterParameter directly.
+        path = "/Script/Pal.PalCharacterParameterComponent:GetCraftSpeed_WorkSuitability",
+        label = "Component:GetCraftSpeed_WorkSuitability",
+        explicit_suitability = true,
+    },
+    {
+        path = "/Script/Pal.PalCharacterParameterComponent:GetCraftSpeed",
+        label = "Component:GetCraftSpeed",
+        explicit_suitability = false,
+    },
     {
         path = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability",
         label = "GetCraftSpeedByWorkSuitability",
@@ -144,8 +157,38 @@ local function current_settings()
     return nil
 end
 
-local function effective_rank(context, suitability)
+local function character_parameter_from_context(context)
     local target = unwrap(context)
+    if not target then return nil end
+
+    -- UPalCharacterParameterComponent is the path used by a number of actual
+    -- work implementations. Resolve it back to the underlying individual
+    -- parameter so rank > 10 can be read correctly.
+    local ok_get, parameter = pcall(function()
+        local fn = target.GetIndividualParameter
+        if type(fn) == "function" then
+            return fn(target)
+        end
+        return nil
+    end)
+    parameter = ok_get and unwrap(parameter) or nil
+    if parameter and is_valid(parameter) then
+        return parameter
+    end
+
+    local ok_prop, property_value = pcall(function()
+        return target.IndividualParameter
+    end)
+    property_value = ok_prop and unwrap(property_value) or nil
+    if property_value and is_valid(property_value) then
+        return property_value
+    end
+
+    return target
+end
+
+local function effective_rank(context, suitability)
+    local target = character_parameter_from_context(context)
     local ws = to_number(suitability)
     if not target or ws == nil then return nil end
 
@@ -171,7 +214,7 @@ local function effective_rank(context, suitability)
 end
 
 local function current_suitability(context)
-    local target = unwrap(context)
+    local target = character_parameter_from_context(context)
     if not target then return nil end
 
     local ok, value = pcall(function()
@@ -214,7 +257,8 @@ local function object_key(value)
 end
 
 local function recent_key(character_parameter, suitability)
-    return object_key(character_parameter) .. "|" .. tostring(to_number(suitability))
+    local normalized = character_parameter_from_context(character_parameter)
+    return object_key(normalized) .. "|" .. tostring(to_number(suitability))
 end
 
 local function mark_recent_craft_scale(character_parameter, suitability)
