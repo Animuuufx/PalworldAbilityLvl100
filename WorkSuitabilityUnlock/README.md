@@ -1,4 +1,4 @@
-# WorkSuitabilityUnlock v0.3
+# WorkSuitabilityUnlock v1.0
 
 Standalone UE4SS Lua mod for Palworld.
 
@@ -6,41 +6,44 @@ Standalone UE4SS Lua mod for Palworld.
 
 Allows Applied Work Suitability Handbooks to be used on Pals that do not naturally have the corresponding work suitability.
 
-Supported handbooks:
+## Current suitability IDs
 
-- `WorkSuitability_AddTicket_EmitFlame` — Kindling
-- `WorkSuitability_AddTicket_Watering` — Watering
-- `WorkSuitability_AddTicket_Seeding` — Planting
-- `WorkSuitability_AddTicket_GenerateElectricity` — Generating Electricity
-- `WorkSuitability_AddTicket_Handcraft` — Handiwork
-- `WorkSuitability_AddTicket_Collection` — Gathering
-- `WorkSuitability_AddTicket_Deforest` — Lumbering
-- `WorkSuitability_AddTicket_Mining` — Mining
-- `WorkSuitability_AddTicket_ProductMedicine` — Medicine Production
-- `WorkSuitability_AddTicket_Cool` — Cooling
-- `WorkSuitability_AddTicket_Transport` — Transporting
-- `WorkSuitability_AddTicket_MonsterFarm` — Farming/Ranching
+v1.0 updates the handbook mapping for the current Palworld enum, which includes Oil Extraction at ID 9:
 
-## v0.3
+- 1 Kindling (`EmitFlame`)
+- 2 Watering
+- 3 Planting (`Seeding`)
+- 4 Generating Electricity
+- 5 Handiwork
+- 6 Gathering (`Collection`)
+- 7 Lumbering (`Deforest`)
+- 8 Mining
+- 9 Oil Extraction
+- 10 Medicine Production
+- 11 Cooling
+- 12 Transporting
+- 13 Farming/Ranching (`MonsterFarm`)
 
-The previous versions attempted to seed `WorkSuitability_*` reflected properties directly. That was incorrect for the handbook system.
+Older builds of this mod used the pre-Oil-Extraction numbering, which could target the wrong suitability for Medicine, Cooling, Transporting, and Farming/Ranching.
 
-Palworld exposes the actual persistent add-rank mutation as `UPalIndividualCharacterParameter::SetWorkSuitabilityAddRank(EPalWorkSuitability, int32)`. The save parameter also contains `GotWorkSuitabilityAddRankList`. v0.3 therefore leaves the native mutation completely intact and removes only the handbook eligibility gate, while logging the real rank-mutation function when it is reached.
+## Supported handbooks
+
+- `WorkSuitability_AddTicket_EmitFlame`
+- `WorkSuitability_AddTicket_Watering`
+- `WorkSuitability_AddTicket_Seeding`
+- `WorkSuitability_AddTicket_GenerateElectricity`
+- `WorkSuitability_AddTicket_Handcraft`
+- `WorkSuitability_AddTicket_Collection`
+- `WorkSuitability_AddTicket_Deforest`
+- `WorkSuitability_AddTicket_Mining`
+- `WorkSuitability_AddTicket_OilExtraction`
+- `WorkSuitability_AddTicket_ProductMedicine`
+- `WorkSuitability_AddTicket_Cool`
+- `WorkSuitability_AddTicket_Transport`
+- `WorkSuitability_AddTicket_MonsterFarm`
 
 ## Install
 
 Copy the `WorkSuitabilityUnlock` folder into the UE4SS `Mods` directory. Keep `enabled.txt` and `Scripts/main.lua` in place.
 
-This mod is independent from `WorkSuitability100` and does not modify its files.
-
-## Test
-
-Use an Applied Kindling Handbook on a Pal that has no Kindling.
-
-Expected log entries include:
-
-`[WorkSuitabilityUnlock v0.3] Handbook eligibility override: EmitFlame`
-
-and, if the native transaction reaches the mutation stage:
-
-`[WorkSuitabilityUnlock v0.3] SetWorkSuitabilityAddRank called: ...`
+This mod is independent from `WorkSuitability100`, but the two can be installed together: WorkSuitabilityUnlock allows missing suitability types to be added, while WorkSuitability100 removes the rank-10 ceiling and scales work throughput above rank 10.
