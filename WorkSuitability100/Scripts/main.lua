@@ -3,7 +3,7 @@ local script = source:sub(1, 1) == "@" and source:sub(2) or source
 local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = (root .. "/Native/WorkSuitability100.dll"):gsub("\\\\", "/")
 
-local VERSION = "v4.2"
+local VERSION = "v4.2.1"
 local TARGET_RANK = 100
 
 -- Rank 30 remains around 100x rank-10 throughput.
@@ -24,11 +24,6 @@ local CRAFT_HOOKS = {
         path = "/Script/Pal.PalCharacterParameterComponent:GetCraftSpeed_WorkSuitability",
         label = "Component:GetCraftSpeed_WorkSuitability",
         explicit_suitability = true,
-    },
-    {
-        path = "/Script/Pal.PalCharacterParameterComponent:GetCraftSpeed",
-        label = "Component:GetCraftSpeed",
-        explicit_suitability = false,
     },
     {
         path = "/Script/Pal.PalIndividualCharacterParameter:GetCraftSpeedByWorkSuitability",
@@ -155,6 +150,28 @@ local function current_settings()
     end
 
     return nil
+end
+
+local runtime_ready = false
+
+local function is_runtime_ready()
+    if runtime_ready then return true end
+
+    -- CharacterParameterComponent speed functions are also called while a save
+    -- is being reconstructed. Do not inspect those partially initialized
+    -- objects. Once the local player character exists, normal world work has
+    -- started and the component path is safe to scale.
+    local ok, player = pcall(function()
+        return FindFirstOf("PalPlayerCharacter")
+    end)
+
+    if ok and player and is_valid(player) then
+        runtime_ready = true
+        print("[WorkSuitability100 " .. VERSION .. "] Runtime world ready; component scaling enabled.")
+        return true
+    end
+
+    return false
 end
 
 local function character_parameter_from_context(context)
@@ -310,6 +327,14 @@ end
 
 local function scale_craft_result(context, suitability, return_value, label)
     local frame, parent = finish_craft_frame()
+
+    -- The component path is hit during save reconstruction, before its
+    -- IndividualParameter is safe to dereference. Ignore it until the local
+    -- player exists; this prevents load-save crashes while keeping the live
+    -- work hook available once gameplay begins.
+    if tostring(label):sub(1, 10) == "Component:" and not is_runtime_ready() then
+        return nil
+    end
 
     -- If a nested craft-speed function already produced the turbo value,
     -- leave the outer function alone. This is important for newer buildings
