@@ -1,4 +1,4 @@
-name: Build WorkSuitability100 v2
+name: Build WorkSuitability100 v4.1
 
 on:
   push:
@@ -9,32 +9,35 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   EXE: PalworldEXE/Palworld-Win64-Shipping.exe
-  DLL: WorkSuitability100/Native/WorkSuitability100.dll
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Checkout with Git LFS
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          lfs: true
+
+      - name: Acquire exact Palworld executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path PalworldEXE | Out-Null
+          $url = 'https://github.com/Animuuufx/PalworldAbilityLvl100/releases/download/Palworld-Win64-Shipping.exe/Palworld-Win64-Shipping.exe'
+          Invoke-WebRequest -Uri $url -OutFile $env:EXE -UseBasicParsing
 
       - name: Verify exact Palworld executable
         shell: pwsh
         run: |
-          if (-not (Test-Path $env:EXE)) { throw "Missing $env:EXE" }
           $f = Get-Item $env:EXE
-          Write-Host "EXE size: $($f.Length) bytes"
-          if ($f.Length -lt 150000000) { throw "Git LFS did not materialize the Palworld executable." }
+          if ($f.Length -ne 161802312) { throw "Unexpected Palworld executable size: $($f.Length)" }
           $hash = (Get-FileHash $env:EXE -Algorithm SHA256).Hash.ToLower()
           Write-Host "EXE SHA256: $hash"
-          if ($hash -ne '44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443') { throw "Unexpected Palworld executable hash." }
+          if ($hash -ne '44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443') {
+            throw "Unexpected Palworld executable hash."
+          }
 
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -48,48 +51,26 @@ jobs:
           cl /nologo /LD /O2 /GS- /EHsc /GR- /std:c++17 WorkSuitability100\Native\WorkSuitability100_v2.cpp /Fe:build\WorkSuitability100.dll /link /MACHINE:X64
           if errorlevel 1 exit /b 1
 
-      - name: Stage release files
+      - name: Stage crash-safe package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path WorkSuitability100/Native | Out-Null
-          Copy-Item build/WorkSuitability100.dll $env:DLL -Force
-          $sha = (Get-FileHash $env:DLL -Algorithm SHA256).Hash.ToLower()
+          Copy-Item build/WorkSuitability100.dll WorkSuitability100/Native/WorkSuitability100.dll -Force
+          $sha = (Get-FileHash WorkSuitability100/Native/WorkSuitability100.dll -Algorithm SHA256).Hash.ToLower()
           @(
-            'WorkSuitability100 v2.0'
+            'WorkSuitability100 package v4.1'
+            'Native DLL runtime: v2.5'
             "DLL SHA256: $sha"
-            "Target EXE SHA256: 44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443"
+            'Target EXE SHA256: 44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443'
             'Target EXE size: 161802312'
+            'Native speed hook RVA: 0x2F79D30'
+            'Live rank getter RVA: 0x2F80390'
+            'Lua container mutation: DISABLED'
             'Build: GitHub Actions / MSVC x64'
           ) | Set-Content WorkSuitability100/Native/BUILD_INFO.txt
-          Compress-Archive -Path WorkSuitability100 -DestinationPath build/WorkSuitability100-v2.0.zip -Force
-
-      - name: Commit built DLL and metadata
-        shell: pwsh
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch origin main
-          git checkout main
-          git reset --hard origin/main
-          Copy-Item build/WorkSuitability100.dll $env:DLL -Force
-          $sha = (Get-FileHash $env:DLL -Algorithm SHA256).Hash.ToLower()
-          @(
-            'WorkSuitability100 v2.0'
-            "DLL SHA256: $sha"
-            "Target EXE SHA256: 44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443"
-            'Target EXE size: 161802312'
-            'Build: GitHub Actions / MSVC x64'
-          ) | Set-Content WorkSuitability100/Native/BUILD_INFO.txt
-          git add WorkSuitability100/Native/WorkSuitability100.dll WorkSuitability100/Native/BUILD_INFO.txt
-          if (-not (git diff --cached --quiet)) {
-            git commit -m 'Build WorkSuitability100 v2.0 [skip ci]'
-            git push origin HEAD:main
-          } else {
-            Write-Host 'Built output unchanged.'
-          }
+          Compress-Archive -Path WorkSuitability100 -DestinationPath build/WorkSuitability100-v4.1.zip -Force
 
       - name: Upload packaged mod
         uses: actions/upload-artifact@v4
         with:
-          name: WorkSuitability100-v2.0
-          path: build/WorkSuitability100-v2.0.zip
+          name: WorkSuitability100-v4.1
+          path: build/WorkSuitability100-v4.1.zip
