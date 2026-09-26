@@ -61,6 +61,13 @@ def main():
     print('SPEED_CANDIDATES='+','.join(f'0x{x:X}' for x in speed))
     for r in speed: disasm(d,ss,base,r,4096)
 
+    # Exact internal bodies reached by the current reflected wrappers. These are
+    # inspected explicitly so the native mod can install a relocation-safe speed hook.
+    focus = [0x2F79B50, 0x2F79D30, 0x2F80300, 0x2F80390]
+    print('FOCUSED_INTERNAL_BODIES:')
+    for r in focus:
+        disasm(d,ss,base,r,0x300)
+
     text=next(x for x in ss if x[0]=='.text'); _,va,rs,rp=text
     print('DIRECT_CALLERS:')
     for target in speed:
