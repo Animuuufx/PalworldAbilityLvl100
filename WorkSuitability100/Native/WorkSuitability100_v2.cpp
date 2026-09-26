@@ -7,6 +7,9 @@
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
+#include <atomic>
+#include <climits>
+#include <cmath>
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -14,6 +17,9 @@ using u32 = uint32_t;
 using u64 = uint64_t;
 
 static constexpr u32 kRankCap = 100;
+static constexpr double kSpeedPerRank = 4.95;
+static constexpr u32 kSpeedRva = 0x2F79D30;
+static constexpr u32 kRankWithCharacterRva = 0x2F80390;
 static HMODULE g_self = nullptr;
 static bool g_initialized = false;
 static bool g_patched = false;
@@ -119,7 +125,7 @@ static bool patch_byte(u8* at, u8 oldv, u8 newv, const char* why, const Range& t
     VirtualProtect(at, 1, oldp, &tmp);
     FlushInstructionCache(GetCurrentProcess(), at, 1);
     char buf[256];
-    sprintf_s(buf, "[WorkSuitability100 v2.4] PATCH %s RVA=0x%X %02X->%02X", why, (u32)(at - base), oldv, newv);
+    sprintf_s(buf, "[WorkSuitability100 v2.5] PATCH %s RVA=0x%X %02X->%02X", why, (u32)(at - base), oldv, newv);
     log_line(buf);
     st.changed++;
     return true;
@@ -318,12 +324,12 @@ static PatchStats patch_named(u8* base, u32 image, const Range& text, const char
     PatchStats total{};
     auto cs = collect_candidates(base, image, text, name);
     char b[256];
-    sprintf_s(b, "[WorkSuitability100 v2.4] %s candidates=%zu", name, cs.size());
+    sprintf_s(b, "[WorkSuitability100 v2.5] %s candidates=%zu", name, cs.size());
     log_line(b);
     for (size_t i = 0; i < std::min<size_t>(cs.size(), 12); i++) {
         auto c = cs[i];
         u8* impl = resolve_lazy(c.fn, text, base);
-        sprintf_s(b, "[WorkSuitability100 v2.4] %s candidate=0x%X impl=0x%X refs=%u", name, c.rva, (u32)(impl - base), c.hits);
+        sprintf_s(b, "[WorkSuitability100 v2.5] %s candidate=0x%X impl=0x%X refs=%u", name, c.rva, (u32)(impl - base), c.hits);
         log_line(b);
         std::unordered_set<u32> visited;
         auto st = scan_function(impl, base, text, 8192, max_fn, 0, visited);
@@ -333,17 +339,123 @@ static PatchStats patch_named(u8* base, u32 image, const Range& text, const char
     return total;
 }
 
+
+using CraftSpeedFn = int(__fastcall*)(void*, u8);
+using RankWithCharacterFn = int(__fastcall*)(void*, u8);
+static CraftSpeedFn g_originalCraftSpeed = nullptr;
+static RankWithCharacterFn g_rankWithCharacter = nullptr;
+static void* g_speedTrampoline = nullptr;
+static std::atomic<u32> g_speedScaleHits{0};
+
+static void write_abs_jump(u8* at, const void* destination)
+{
+    at[0] = 0xFF; at[1] = 0x25;
+    *reinterpret_cast<u32*>(at + 2) = 0;
+    *reinterpret_cast<u64*>(at + 6) = reinterpret_cast<u64>(destination);
+}
+
+static int __fastcall craft_speed_detour(void* self, u8 suitability)
+{
+    const int vanilla = g_originalCraftSpeed ? g_originalCraftSpeed(self, suitability) : 0;
+    if (!self || !g_rankWithCharacter || vanilla <= 0) return vanilla;
+
+    int rank = 0;
+    __try {
+        rank = g_rankWithCharacter(self, suitability);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return vanilla;
+    }
+
+    if (rank <= 10) return vanilla;
+    if (rank > static_cast<int>(kRankCap)) rank = static_cast<int>(kRankCap);
+
+    const double factor = 1.0 + (static_cast<double>(rank - 10) * kSpeedPerRank);
+    long long scaled = static_cast<long long>(
+        std::llround(static_cast<double>(vanilla) * factor));
+    if (scaled < 1) scaled = 1;
+    if (scaled > INT_MAX) scaled = INT_MAX;
+
+    const u32 hit = g_speedScaleHits.fetch_add(1, std::memory_order_relaxed);
+    if (hit < 8) {
+        char b[256];
+        sprintf_s(b,
+            "[WorkSuitability100 v2.5] SPEED suitability=%u rank=%d vanilla=%d scaled=%lld",
+            static_cast<unsigned>(suitability), rank, vanilla, scaled);
+        log_line(b);
+    }
+    return static_cast<int>(scaled);
+}
+
+static bool install_speed_hook(u8* base, u32 image, const Range& text)
+{
+    if (g_speedTrampoline && g_originalCraftSpeed && g_rankWithCharacter) return true;
+    if (!base || kSpeedRva >= image || kRankWithCharacterRva >= image) return false;
+
+    u8* target = base + kSpeedRva;
+    u8* rankFn = base + kRankWithCharacterRva;
+    if (!in_text(target, text) || !in_text(rankFn, text)) return false;
+
+    // Exact first 18 bytes of GetCraftSpeedByWorkSuitability on the validated EXE.
+    // They are only nonvolatile-register saves, so the trampoline needs no relocation.
+    static constexpr u8 expected[18] = {
+        0x48,0x89,0x5C,0x24,0x18,
+        0x48,0x89,0x74,0x24,0x20,
+        0x55,0x57,0x41,0x54,0x41,0x56,0x41,0x57
+    };
+    if (std::memcmp(target, expected, sizeof(expected)) != 0) {
+        log_line("[WorkSuitability100 v2.5] SPEED HOOK skipped: target prologue does not match validated EXE.");
+        return false;
+    }
+
+    constexpr size_t stolen = sizeof(expected);
+    constexpr size_t jumpSize = 14;
+    auto* trampoline = static_cast<u8*>(VirtualAlloc(
+        nullptr, stolen + jumpSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!trampoline) {
+        log_line("[WorkSuitability100 v2.5] SPEED HOOK failed: VirtualAlloc trampoline failed.");
+        return false;
+    }
+
+    std::memcpy(trampoline, target, stolen);
+    write_abs_jump(trampoline + stolen, target + stolen);
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, stolen, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        log_line("[WorkSuitability100 v2.5] SPEED HOOK failed: VirtualProtect target failed.");
+        return false;
+    }
+
+    write_abs_jump(target, reinterpret_cast<void*>(&craft_speed_detour));
+    for (size_t i = jumpSize; i < stolen; ++i) target[i] = 0x90;
+
+    DWORD ignored = 0;
+    VirtualProtect(target, stolen, oldProtect, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), target, stolen);
+
+    g_speedTrampoline = trampoline;
+    g_originalCraftSpeed = reinterpret_cast<CraftSpeedFn>(trampoline);
+    g_rankWithCharacter = reinterpret_cast<RankWithCharacterFn>(rankFn);
+
+    char b[256];
+    sprintf_s(b,
+        "[WorkSuitability100 v2.5] SPEED HOOK installed speedRVA=0x%X rankRVA=0x%X",
+        kSpeedRva, kRankWithCharacterRva);
+    log_line(b);
+    return true;
+}
+
 static bool apply_patch()
 {
     u8* base = (u8*)GetModuleHandleW(nullptr);
     if (!base) return false;
     Range text{}; u32 image = 0;
     if (!get_ranges(base, text, image)) {
-        log_line("[WorkSuitability100 v2.4] ERROR: PE/.text discovery failed.");
+        log_line("[WorkSuitability100 v2.5] ERROR: PE/.text discovery failed.");
         return false;
     }
     char b[256];
-    sprintf_s(b, "[WorkSuitability100 v2.4] module=%p .text RVA=0x%X size=0x%X image=0x%X", base, text.rva, text.size, image);
+    sprintf_s(b, "[WorkSuitability100 v2.5] module=%p .text RVA=0x%X size=0x%X image=0x%X", base, text.rva, text.size, image);
     log_line(b);
     PatchStats max = patch_named(base, image, text, "WorkSuitabilityMaxRank", true);
     PatchStats gate = patch_named(base, image, text, "CanUseTargetWorkSuitabilityRankUp", false);
@@ -352,13 +464,17 @@ static bool apply_patch()
     PatchStats has = patch_named(base, image, text, "HasWorkSuitabilityRank", false);
     u32 changed = max.changed + gate.changed + rank.changed + rank2.changed + has.changed;
     u32 already = max.already + gate.already + rank.already + rank2.already + has.already;
-    sprintf_s(b, "[WorkSuitability100 v2.4] RESULT changed=%u already100=%u", changed, already);
+    sprintf_s(b, "[WorkSuitability100 v2.5] RESULT changed=%u already100=%u", changed, already);
     log_line(b);
-    if (changed >= 1 || (max.already >= 1 && gate.already >= 1)) {
-        log_line("[WorkSuitability100 v2.4] Compatibility initialization successful.");
+    const bool speedHook = install_speed_hook(base, image, text);
+    log_line(speedHook
+        ? "[WorkSuitability100 v2.5] Native >10 work-speed scaling enabled."
+        : "[WorkSuitability100 v2.5] WARNING: native >10 work-speed scaling was not installed.");
+    if ((changed >= 1 || (max.already >= 1 && gate.already >= 1)) && speedHook) {
+        log_line("[WorkSuitability100 v2.5] Compatibility initialization successful (rank cap + real speed scaling).");
         return true;
     }
-    log_line("[WorkSuitability100 v2.4] ERROR: relevant rank logic was found but no validated level-10/100 transition was established.");
+    log_line("[WorkSuitability100 v2.5] ERROR: relevant rank logic was found but no validated level-10/100 transition was established.");
     return false;
 }
 
@@ -380,7 +496,7 @@ extern "C" __declspec(dllexport) int luaopen_WorkSuitability100(void*)
     if (g_initialized) return 0;
     g_initialized = true;
     init_log();
-    log_line("[WorkSuitability100 v2.4] Loaded through Lua package.loadlib.");
+    log_line("[WorkSuitability100 v2.5] Loaded through Lua package.loadlib.");
     g_patched = apply_patch();
     return 0;
 }
