@@ -63,7 +63,7 @@ def main():
 
     # Exact internal bodies reached by the current reflected wrappers. These are
     # inspected explicitly so the native mod can install a relocation-safe speed hook.
-    focus = [0x2F79B50, 0x2F79D30, 0x2F80300, 0x2F80390]
+    focus = [0x2F79B50, 0x2F79D30, 0x2F80300, 0x2F80390, 0x2F16210]
     print('FOCUSED_INTERNAL_BODIES:')
     for r in focus:
         disasm(d,ss,base,r,0x300)
