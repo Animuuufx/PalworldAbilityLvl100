@@ -461,8 +461,14 @@ static bool install_speed_call_redirect(u8* base, u32 image, const Range& text)
         return false;
     }
 
+    // Publish the untouched original target before redirecting the live call site.
+    // If another game thread reaches the call immediately after the patch, the wrapper
+    // already has a valid function pointer.
+    g_originalRankSpeed = reinterpret_cast<RankSpeedLookupFn>(lookup);
+
     DWORD oldProtect = 0;
     if (!VirtualProtect(callSite, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        g_originalRankSpeed = nullptr;
         VirtualFree(stub, 0, MEM_RELEASE);
         log_line("[WorkSuitability100 v2.6] SPEED REDIRECT failed: VirtualProtect call site failed.");
         return false;
@@ -476,7 +482,6 @@ static bool install_speed_call_redirect(u8* base, u32 image, const Range& text)
     VirtualProtect(callSite, 5, oldProtect, &ignored);
     FlushInstructionCache(GetCurrentProcess(), callSite, 5);
 
-    g_originalRankSpeed = reinterpret_cast<RankSpeedLookupFn>(lookup);
     g_speedStub = stub;
 
     char b[256];
