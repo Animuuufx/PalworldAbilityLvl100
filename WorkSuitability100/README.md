@@ -1,66 +1,72 @@
-# WorkSuitability100 v4.1 — crash-safe native speed build
+# WorkSuitability100 v4.2 — crash-safe lookup redirect
 
-This build allows Pal Work Suitability ranks above 10 while avoiding the live Unreal container edits that caused the new-world crash in v4.0.
+v4.2 removes the v4.1 whole-function native detour that still crashed while a new Palworld world was starting.
 
-## What caused the crash
+## What changed from v4.1
 
-v4.0 resized Palworld-owned `CraftSpeeds` and special-work `TArray` values and then wrote modified rows back into `WorkSuitabilityDefineDataMap` while a world was loading.
+v4.1 correctly removed all Lua TArray/TMap mutations, but it still replaced the entry of
+`GetCraftSpeedByWorkSuitability` with a hand-built trampoline.
 
-That can invalidate a UE4SS/native wrapper while Palworld is still constructing its game settings. The result is a native access violation such as:
+The September 26 crash log confirms v4.1 loads successfully and reaches `MainWorld_5`, then
+the process stops during world initialization. That makes the whole-function native detour the
+remaining unsafe path.
 
-`EXCEPTION_ACCESS_VIOLATION writing address 0x0000000000001438`
+v4.2 does **not** detour that function.
 
-Lua `pcall` cannot catch a native access violation, so delaying or wrapping those writes was not enough. v4.1 removes that approach completely.
+The supported executable contains this native sequence inside
+`GetCraftSpeedByWorkSuitability`:
 
-## v4.1 behavior
+- rank is already in `r8d`
+- suitability type is already in `dl`
+- game settings object is already in `rcx`
+- one direct call at RVA `0x2F79F05` goes to the rank→craft-speed lookup at RVA `0x2F16210`
 
-- Lua only loads the native DLL.
-- Lua performs **no** `PalGameSetting`, `TArray`, or `TMap` mutation.
-- The existing validated rank-cap patch still raises suitability handling from 10 to 100.
-- The DLL hooks the exact native `GetCraftSpeedByWorkSuitability` routine for the supplied Palworld executable.
-- It reads the Pal's live `GetWorkSuitabilityRankWithCharacterRank` value.
-- Ranks 1–10 keep vanilla speed.
-- Ranks 11–100 scale the **real work-speed value returned to the facility**, not only the displayed rank.
-- Because the hook sits in the shared suitability work-speed path, suitability-driven facilities such as workstations, furnaces and watering production use the higher value without needing per-building hard-coded names.
-- Before installing, the DLL verifies the exact machine-code prologue at the target RVA. A changed Palworld executable causes the speed hook to be skipped instead of patching an unknown address.
+Palworld's own lookup safely clamps an out-of-range rank to the final existing
+`CraftSpeeds` entry. The relevant native logic compares the requested rank with the
+array count and substitutes `count - 1` when the rank is too high.
 
-## Scaling above rank 10
+v4.2 redirects **only that single validated CALL instruction** to a small near stub.
+The stub jumps to the DLL wrapper, which:
 
-v4.1 keeps the scaling rule used by the previous attempt:
+1. leaves ranks 1–10 completely vanilla;
+2. asks Palworld's original lookup for rank 10 when the real rank is 11–100;
+3. multiplies that real rank-10 speed by the configured higher-rank factor;
+4. returns the scaled integer to the untouched Palworld function.
+
+There is:
+
+- no Lua game-setting mutation;
+- no TArray/TMap resize;
+- no call back into a Pal object;
+- no replacement of a Palworld function prologue;
+- no copied/trampolined game instructions.
+
+## Scaling
 
 `factor = 1 + ((rank - 10) * 4.95)`
 
-The DLL multiplies Palworld's own returned rank-10 work-speed value by that factor.
+## Target executable
 
-## Target build
-
-- Palworld executable SHA-256: `44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443`
-- Executable size: `161802312`
-- Craft-speed RVA: `0x2F79D30`
-- Live rank getter RVA: `0x2F80390`
+- SHA-256: `44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443`
+- size: `161802312`
+- craft-speed lookup call RVA: `0x2F79F05`
+- original rank→speed lookup RVA: `0x2F16210`
 
 ## Install
 
-Delete/replace the **entire old `WorkSuitability100` folder** in your UE4SS `Mods` directory with the v4.1 folder, then fully restart Palworld.
+Delete the entire old `UE4SS/Mods/WorkSuitability100` folder first, then copy this v4.2
+folder in fresh and fully restart Palworld.
 
-Do not mix the v4.0 `Scripts/main.lua` with this DLL.
+## Expected native log
 
-## Verify
+`WorkSuitability100/Native/WorkSuitability100.log` should include:
 
-After launching, open:
+`SPEED REDIRECT installed callRVA=0x2F79F05 lookupRVA=0x2F16210`
 
-`Mods/WorkSuitability100/Native/WorkSuitability100.log`
+`Native >10 work-speed scaling enabled through direct lookup redirect.`
 
-A correct install should contain:
+`Compatibility initialization successful (rank cap + crash-safe lookup scaling).`
 
-`SPEED HOOK installed speedRVA=0x2F79D30 rankRVA=0x2F80390`
+When rank 11+ work is actually evaluated, the first calls log:
 
-`Native >10 work-speed scaling enabled.`
-
-`Compatibility initialization successful (rank cap + real speed scaling).`
-
-When a Pal with rank 11+ performs suitability work, the first few calls also log:
-
-`SPEED suitability=... rank=... vanilla=... scaled=...`
-
-That line proves the actual work-speed number is being changed.
+`SPEED suitability=... rank=... vanilla10=... scaled=...`
