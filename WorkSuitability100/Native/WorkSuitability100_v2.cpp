@@ -354,17 +354,25 @@ static void write_abs_jump(u8* at, const void* destination)
     *reinterpret_cast<u64*>(at + 6) = reinterpret_cast<u64>(destination);
 }
 
+__declspec(noinline) static bool safe_rank_call(
+    RankWithCharacterFn fn, void* self, u8 suitability, int* outRank)
+{
+    if (!fn || !self || !outRank) return false;
+    __try {
+        *outRank = fn(self, suitability);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 static int __fastcall craft_speed_detour(void* self, u8 suitability)
 {
     const int vanilla = g_originalCraftSpeed ? g_originalCraftSpeed(self, suitability) : 0;
     if (!self || !g_rankWithCharacter || vanilla <= 0) return vanilla;
 
     int rank = 0;
-    __try {
-        rank = g_rankWithCharacter(self, suitability);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return vanilla;
-    }
+    if (!safe_rank_call(g_rankWithCharacter, self, suitability, &rank)) return vanilla;
 
     if (rank <= 10) return vanilla;
     if (rank > static_cast<int>(kRankCap)) rank = static_cast<int>(kRankCap);
