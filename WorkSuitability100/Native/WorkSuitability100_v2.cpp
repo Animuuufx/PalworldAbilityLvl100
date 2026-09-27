@@ -18,8 +18,8 @@ using u64 = uint64_t;
 
 static constexpr u32 kRankCap = 100;
 static constexpr double kSpeedPerRank = 4.95;
-static constexpr u32 kSpeedRva = 0x2F79D30;
-static constexpr u32 kRankWithCharacterRva = 0x2F80390;
+static constexpr u32 kCraftSpeedCallRva = 0x2F79F05;
+static constexpr u32 kRankSpeedLookupRva = 0x2F16210;
 static HMODULE g_self = nullptr;
 static bool g_initialized = false;
 static bool g_patched = false;
@@ -125,7 +125,7 @@ static bool patch_byte(u8* at, u8 oldv, u8 newv, const char* why, const Range& t
     VirtualProtect(at, 1, oldp, &tmp);
     FlushInstructionCache(GetCurrentProcess(), at, 1);
     char buf[256];
-    sprintf_s(buf, "[WorkSuitability100 v2.5] PATCH %s RVA=0x%X %02X->%02X", why, (u32)(at - base), oldv, newv);
+    sprintf_s(buf, "[WorkSuitability100 v2.6] PATCH %s RVA=0x%X %02X->%02X", why, (u32)(at - base), oldv, newv);
     log_line(buf);
     st.changed++;
     return true;
@@ -324,12 +324,12 @@ static PatchStats patch_named(u8* base, u32 image, const Range& text, const char
     PatchStats total{};
     auto cs = collect_candidates(base, image, text, name);
     char b[256];
-    sprintf_s(b, "[WorkSuitability100 v2.5] %s candidates=%zu", name, cs.size());
+    sprintf_s(b, "[WorkSuitability100 v2.6] %s candidates=%zu", name, cs.size());
     log_line(b);
     for (size_t i = 0; i < std::min<size_t>(cs.size(), 12); i++) {
         auto c = cs[i];
         u8* impl = resolve_lazy(c.fn, text, base);
-        sprintf_s(b, "[WorkSuitability100 v2.5] %s candidate=0x%X impl=0x%X refs=%u", name, c.rva, (u32)(impl - base), c.hits);
+        sprintf_s(b, "[WorkSuitability100 v2.6] %s candidate=0x%X impl=0x%X refs=%u", name, c.rva, (u32)(impl - base), c.hits);
         log_line(b);
         std::unordered_set<u32> visited;
         auto st = scan_function(impl, base, text, 8192, max_fn, 0, visited);
@@ -340,115 +340,149 @@ static PatchStats patch_named(u8* base, u32 image, const Range& text, const char
 }
 
 
-using CraftSpeedFn = int(__fastcall*)(void*, u8);
-using RankWithCharacterFn = int(__fastcall*)(void*, u8);
-static CraftSpeedFn g_originalCraftSpeed = nullptr;
-static RankWithCharacterFn g_rankWithCharacter = nullptr;
-static void* g_speedTrampoline = nullptr;
+
+using RankSpeedLookupFn = int(__fastcall*)(void*, u8, int);
+static RankSpeedLookupFn g_originalRankSpeed = nullptr;
+static void* g_speedStub = nullptr;
 static std::atomic<u32> g_speedScaleHits{0};
 
-static void write_abs_jump(u8* at, const void* destination)
+static int __fastcall rank_speed_wrapper(void* settings, u8 suitability, int rank)
 {
-    at[0] = 0xFF; at[1] = 0x25;
-    *reinterpret_cast<u32*>(at + 2) = 0;
-    *reinterpret_cast<u64*>(at + 6) = reinterpret_cast<u64>(destination);
-}
+    if (!g_originalRankSpeed) return 0;
 
-__declspec(noinline) static bool safe_rank_call(
-    RankWithCharacterFn fn, void* self, u8 suitability, int* outRank)
-{
-    if (!fn || !self || !outRank) return false;
-    __try {
-        *outRank = fn(self, suitability);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+    if (rank <= 10) {
+        return g_originalRankSpeed(settings, suitability, rank);
     }
-}
 
-static int __fastcall craft_speed_detour(void* self, u8 suitability)
-{
-    const int vanilla = g_originalCraftSpeed ? g_originalCraftSpeed(self, suitability) : 0;
-    if (!self || !g_rankWithCharacter || vanilla <= 0) return vanilla;
+    int boundedRank = rank;
+    if (boundedRank > static_cast<int>(kRankCap)) boundedRank = static_cast<int>(kRankCap);
 
-    int rank = 0;
-    if (!safe_rank_call(g_rankWithCharacter, self, suitability, &rank)) return vanilla;
+    // Palworld's own lookup clamps an out-of-range rank to the final CraftSpeeds entry.
+    // Ask explicitly for rank 10, then scale that real vanilla value for rank 11-100.
+    const int vanilla = g_originalRankSpeed(settings, suitability, 10);
+    if (vanilla <= 0) return vanilla;
 
-    if (rank <= 10) return vanilla;
-    if (rank > static_cast<int>(kRankCap)) rank = static_cast<int>(kRankCap);
-
-    const double factor = 1.0 + (static_cast<double>(rank - 10) * kSpeedPerRank);
+    const double factor = 1.0 + (static_cast<double>(boundedRank - 10) * kSpeedPerRank);
     long long scaled = static_cast<long long>(
         std::llround(static_cast<double>(vanilla) * factor));
     if (scaled < 1) scaled = 1;
     if (scaled > INT_MAX) scaled = INT_MAX;
 
     const u32 hit = g_speedScaleHits.fetch_add(1, std::memory_order_relaxed);
-    if (hit < 8) {
+    if (hit < 12) {
         char b[256];
         sprintf_s(b,
-            "[WorkSuitability100 v2.5] SPEED suitability=%u rank=%d vanilla=%d scaled=%lld",
-            static_cast<unsigned>(suitability), rank, vanilla, scaled);
+            "[WorkSuitability100 v2.6] SPEED suitability=%u rank=%d vanilla10=%d scaled=%lld",
+            static_cast<unsigned>(suitability), boundedRank, vanilla, scaled);
         log_line(b);
     }
     return static_cast<int>(scaled);
 }
 
-static bool install_speed_hook(u8* base, u32 image, const Range& text)
+static void* allocate_near(void* target, size_t bytes)
 {
-    if (g_speedTrampoline && g_originalCraftSpeed && g_rankWithCharacter) return true;
-    if (!base || kSpeedRva >= image || kRankWithCharacterRva >= image) return false;
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const uintptr_t gran = static_cast<uintptr_t>(si.dwAllocationGranularity);
+    const uintptr_t center = reinterpret_cast<uintptr_t>(target);
+    const uintptr_t window = 0x7FFF0000ULL;
 
-    u8* target = base + kSpeedRva;
-    u8* rankFn = base + kRankWithCharacterRva;
-    if (!in_text(target, text) || !in_text(rankFn, text)) return false;
+    uintptr_t minAddr = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
+    if (center > window && center - window > minAddr) minAddr = center - window;
 
-    // Exact first 18 bytes of GetCraftSpeedByWorkSuitability on the validated EXE.
-    // They are only nonvolatile-register saves, so the trampoline needs no relocation.
-    static constexpr u8 expected[18] = {
-        0x48,0x89,0x5C,0x24,0x18,
-        0x48,0x89,0x74,0x24,0x20,
-        0x55,0x57,0x41,0x54,0x41,0x56,0x41,0x57
-    };
-    if (std::memcmp(target, expected, sizeof(expected)) != 0) {
-        log_line("[WorkSuitability100 v2.5] SPEED HOOK skipped: target prologue does not match validated EXE.");
+    uintptr_t maxAddr = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+    if (center + window < maxAddr) maxAddr = center + window;
+
+    uintptr_t p = minAddr;
+    MEMORY_BASIC_INFORMATION mbi{};
+    while (p < maxAddr) {
+        if (!VirtualQuery(reinterpret_cast<void*>(p), &mbi, sizeof(mbi))) break;
+        const uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        const uintptr_t regionEnd = regionBase + mbi.RegionSize;
+
+        if (mbi.State == MEM_FREE) {
+            uintptr_t candidate = regionBase < minAddr ? minAddr : regionBase;
+            candidate = (candidate + gran - 1) & ~(gran - 1);
+            if (candidate + bytes <= regionEnd && candidate + bytes <= maxAddr) {
+                if (void* mem = VirtualAlloc(reinterpret_cast<void*>(candidate), bytes,
+                                             MEM_RESERVE | MEM_COMMIT,
+                                             PAGE_EXECUTE_READWRITE)) {
+                    return mem;
+                }
+            }
+        }
+
+        if (regionEnd <= p) break;
+        p = regionEnd;
+    }
+    return nullptr;
+}
+
+static bool install_speed_call_redirect(u8* base, u32 image, const Range& text)
+{
+    if (g_speedStub && g_originalRankSpeed) return true;
+    if (!base || kCraftSpeedCallRva >= image || kRankSpeedLookupRva >= image) return false;
+
+    u8* callSite = base + kCraftSpeedCallRva;
+    u8* lookup = base + kRankSpeedLookupRva;
+    if (!in_text(callSite, text) || !in_text(lookup, text)) return false;
+
+    // Validate the exact call before touching it. On the supported EXE this is:
+    //   mov r8d, ebx
+    //   movzx edx, dil
+    //   mov rcx, rax
+    //   call 0x2F16210
+    if (callSite[0] != 0xE8 || rel_target(callSite) != lookup) {
+        log_line("[WorkSuitability100 v2.6] SPEED REDIRECT skipped: expected rank->speed call not found.");
         return false;
     }
 
-    constexpr size_t stolen = sizeof(expected);
-    constexpr size_t jumpSize = 14;
-    auto* trampoline = static_cast<u8*>(VirtualAlloc(
-        nullptr, stolen + jumpSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-    if (!trampoline) {
-        log_line("[WorkSuitability100 v2.5] SPEED HOOK failed: VirtualAlloc trampoline failed.");
+    // A tiny near stub lets the existing 5-byte CALL reach our DLL function without
+    // replacing any game function prologue or constructing an unwind-unsafe trampoline.
+    auto* stub = static_cast<u8*>(allocate_near(callSite, 0x1000));
+    if (!stub) {
+        log_line("[WorkSuitability100 v2.6] SPEED REDIRECT failed: no near executable page available.");
         return false;
     }
 
-    std::memcpy(trampoline, target, stolen);
-    write_abs_jump(trampoline + stolen, target + stolen);
+    // mov rax, <rank_speed_wrapper>; jmp rax
+    stub[0] = 0x48;
+    stub[1] = 0xB8;
+    *reinterpret_cast<u64*>(stub + 2) = reinterpret_cast<u64>(&rank_speed_wrapper);
+    stub[10] = 0xFF;
+    stub[11] = 0xE0;
+    FlushInstructionCache(GetCurrentProcess(), stub, 12);
+
+    const intptr_t delta = reinterpret_cast<intptr_t>(stub) -
+                           reinterpret_cast<intptr_t>(callSite + 5);
+    if (delta < INT32_MIN || delta > INT32_MAX) {
+        VirtualFree(stub, 0, MEM_RELEASE);
+        log_line("[WorkSuitability100 v2.6] SPEED REDIRECT failed: near stub is outside rel32 range.");
+        return false;
+    }
 
     DWORD oldProtect = 0;
-    if (!VirtualProtect(target, stolen, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        VirtualFree(trampoline, 0, MEM_RELEASE);
-        log_line("[WorkSuitability100 v2.5] SPEED HOOK failed: VirtualProtect target failed.");
+    if (!VirtualProtect(callSite, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        VirtualFree(stub, 0, MEM_RELEASE);
+        log_line("[WorkSuitability100 v2.6] SPEED REDIRECT failed: VirtualProtect call site failed.");
         return false;
     }
 
-    write_abs_jump(target, reinterpret_cast<void*>(&craft_speed_detour));
-    for (size_t i = jumpSize; i < stolen; ++i) target[i] = 0x90;
+    callSite[0] = 0xE8;
+    const int32_t rel = static_cast<int32_t>(delta);
+    std::memcpy(callSite + 1, &rel, sizeof(rel));
 
     DWORD ignored = 0;
-    VirtualProtect(target, stolen, oldProtect, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), target, stolen);
+    VirtualProtect(callSite, 5, oldProtect, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), callSite, 5);
 
-    g_speedTrampoline = trampoline;
-    g_originalCraftSpeed = reinterpret_cast<CraftSpeedFn>(trampoline);
-    g_rankWithCharacter = reinterpret_cast<RankWithCharacterFn>(rankFn);
+    g_originalRankSpeed = reinterpret_cast<RankSpeedLookupFn>(lookup);
+    g_speedStub = stub;
 
     char b[256];
     sprintf_s(b,
-        "[WorkSuitability100 v2.5] SPEED HOOK installed speedRVA=0x%X rankRVA=0x%X",
-        kSpeedRva, kRankWithCharacterRva);
+        "[WorkSuitability100 v2.6] SPEED REDIRECT installed callRVA=0x%X lookupRVA=0x%X stub=%p",
+        kCraftSpeedCallRva, kRankSpeedLookupRva, stub);
     log_line(b);
     return true;
 }
@@ -459,11 +493,11 @@ static bool apply_patch()
     if (!base) return false;
     Range text{}; u32 image = 0;
     if (!get_ranges(base, text, image)) {
-        log_line("[WorkSuitability100 v2.5] ERROR: PE/.text discovery failed.");
+        log_line("[WorkSuitability100 v2.6] ERROR: PE/.text discovery failed.");
         return false;
     }
     char b[256];
-    sprintf_s(b, "[WorkSuitability100 v2.5] module=%p .text RVA=0x%X size=0x%X image=0x%X", base, text.rva, text.size, image);
+    sprintf_s(b, "[WorkSuitability100 v2.6] module=%p .text RVA=0x%X size=0x%X image=0x%X", base, text.rva, text.size, image);
     log_line(b);
     PatchStats max = patch_named(base, image, text, "WorkSuitabilityMaxRank", true);
     PatchStats gate = patch_named(base, image, text, "CanUseTargetWorkSuitabilityRankUp", false);
@@ -472,17 +506,17 @@ static bool apply_patch()
     PatchStats has = patch_named(base, image, text, "HasWorkSuitabilityRank", false);
     u32 changed = max.changed + gate.changed + rank.changed + rank2.changed + has.changed;
     u32 already = max.already + gate.already + rank.already + rank2.already + has.already;
-    sprintf_s(b, "[WorkSuitability100 v2.5] RESULT changed=%u already100=%u", changed, already);
+    sprintf_s(b, "[WorkSuitability100 v2.6] RESULT changed=%u already100=%u", changed, already);
     log_line(b);
-    const bool speedHook = install_speed_hook(base, image, text);
-    log_line(speedHook
-        ? "[WorkSuitability100 v2.5] Native >10 work-speed scaling enabled."
-        : "[WorkSuitability100 v2.5] WARNING: native >10 work-speed scaling was not installed.");
-    if ((changed >= 1 || (max.already >= 1 && gate.already >= 1)) && speedHook) {
-        log_line("[WorkSuitability100 v2.5] Compatibility initialization successful (rank cap + real speed scaling).");
+    const bool speedRedirect = install_speed_call_redirect(base, image, text);
+    log_line(speedRedirect
+        ? "[WorkSuitability100 v2.6] Native >10 work-speed scaling enabled through direct lookup redirect."
+        : "[WorkSuitability100 v2.6] WARNING: native >10 work-speed scaling redirect was not installed.");
+    if ((changed >= 1 || (max.already >= 1 && gate.already >= 1)) && speedRedirect) {
+        log_line("[WorkSuitability100 v2.6] Compatibility initialization successful (rank cap + crash-safe lookup scaling).");
         return true;
     }
-    log_line("[WorkSuitability100 v2.5] ERROR: relevant rank logic was found but no validated level-10/100 transition was established.");
+    log_line("[WorkSuitability100 v2.6] ERROR: relevant rank logic was found but no validated level-10/100 transition was established.");
     return false;
 }
 
@@ -504,7 +538,7 @@ extern "C" __declspec(dllexport) int luaopen_WorkSuitability100(void*)
     if (g_initialized) return 0;
     g_initialized = true;
     init_log();
-    log_line("[WorkSuitability100 v2.5] Loaded through Lua package.loadlib.");
+    log_line("[WorkSuitability100 v2.6] Loaded through Lua package.loadlib.");
     g_patched = apply_patch();
     return 0;
 }
