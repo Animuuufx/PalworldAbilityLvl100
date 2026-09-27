@@ -1,4 +1,4 @@
-name: Build WorkSuitability100 v4.1
+name: Build WorkSuitability100 v4.2
 
 on:
   push:
@@ -51,26 +51,28 @@ jobs:
           cl /nologo /LD /O2 /GS- /EHsc /GR- /std:c++17 WorkSuitability100\Native\WorkSuitability100_v2.cpp /Fe:build\WorkSuitability100.dll /link /MACHINE:X64
           if errorlevel 1 exit /b 1
 
-      - name: Stage crash-safe package
+      - name: Stage v4.2 package
         shell: pwsh
         run: |
           Copy-Item build/WorkSuitability100.dll WorkSuitability100/Native/WorkSuitability100.dll -Force
+          Remove-Item WorkSuitability100/Native/WorkSuitability100.log -ErrorAction SilentlyContinue
           $sha = (Get-FileHash WorkSuitability100/Native/WorkSuitability100.dll -Algorithm SHA256).Hash.ToLower()
           @(
-            'WorkSuitability100 package v4.1'
-            'Native DLL runtime: v2.5'
+            'WorkSuitability100 package v4.2'
+            'Native DLL runtime: v2.6'
             "DLL SHA256: $sha"
             'Target EXE SHA256: 44b6295e70aa37b83d1c42ce1dcf865a7ffadcd300298b0e49a02bad8eb83443'
             'Target EXE size: 161802312'
-            'Native speed hook RVA: 0x2F79D30'
-            'Live rank getter RVA: 0x2F80390'
+            'Craft-speed lookup call RVA: 0x2F79F05'
+            'Rank-to-speed lookup RVA: 0x2F16210'
+            'Whole-function trampoline: REMOVED'
             'Lua container mutation: DISABLED'
             'Build: GitHub Actions / MSVC x64'
           ) | Set-Content WorkSuitability100/Native/BUILD_INFO.txt
-          Compress-Archive -Path WorkSuitability100 -DestinationPath build/WorkSuitability100-v4.1.zip -Force
+          Compress-Archive -Path WorkSuitability100 -DestinationPath build/WorkSuitability100-v4.2.zip -Force
 
       - name: Upload packaged mod
         uses: actions/upload-artifact@v4
         with:
-          name: WorkSuitability100-v4.1
-          path: build/WorkSuitability100-v4.1.zip
+          name: WorkSuitability100-v4.2
+          path: build/WorkSuitability100-v4.2.zip
