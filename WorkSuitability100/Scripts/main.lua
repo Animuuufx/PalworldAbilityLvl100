@@ -3,7 +3,7 @@ local script = source:sub(1, 1) == "@" and source:sub(2) or source
 local root = script:match("^(.*)[\\/]Scripts[\\/]main%.lua$") or "."
 local dll = (root .. "/Native/WorkSuitability100.dll"):gsub("\\\\", "/")
 
-local VERSION = "v4.1"
+local VERSION = "v4.2"
 
 local function log(msg)
     print("[WorkSuitability100 " .. VERSION .. "] " .. tostring(msg))
@@ -27,9 +27,7 @@ if not init_ok then
     return
 end
 
--- IMPORTANT:
--- v4.1 intentionally performs ZERO writes to PalGameSetting, TArray, or TMap values.
--- v4.0 resized live CraftSpeeds/special-work arrays during world creation; those native
--- container writes could invalidate UE4SS wrappers and crash with EXCEPTION_ACCESS_VIOLATION.
--- Rank-cap compatibility and actual >10 work-speed scaling now live entirely in the DLL.
-log("Native rank + real work-speed patch initialized. Runtime container mutation is disabled.")
+-- v4.2 performs no PalGameSetting/TArray/TMap mutation from Lua.
+-- It also no longer detours the whole GetCraftSpeedByWorkSuitability native function.
+-- The DLL redirects only its validated internal rank->speed lookup call.
+log("Native rank + crash-safe work-speed lookup patch initialized. Runtime container mutation is disabled.")
